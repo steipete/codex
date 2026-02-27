@@ -1513,6 +1513,7 @@ impl Session {
         for event in events {
             sess.send_event_raw(event).await;
         }
+        let hook_session_ref = compute_hook_session_ref(sess.as_ref()).await;
         dispatch_nonfatal_lifecycle_hook(
             sess.as_ref(),
             HookPayload {
@@ -1522,7 +1523,7 @@ impl Session {
                 triggered_at: chrono::Utc::now(),
                 hook_event: HookEvent::SessionStart {
                     event: HookEventLifecycle {
-                        session_ref: conversation_id.to_string(),
+                        session_ref: hook_session_ref,
                         previous_session_id: None,
                         prompt: None,
                         response_message: None,
@@ -4595,6 +4596,13 @@ mod handlers {
 
         // Gracefully flush and shutdown rollout recorder on session end so tests
         // that inspect the rollout file do not race with the background writer.
+        let hook_session_ref = {
+            let rollout = sess.services.rollout.lock().await;
+            rollout
+                .as_ref()
+                .map(|recorder| recorder.rollout_path().display().to_string())
+                .unwrap_or_else(|| sess.conversation_id.to_string())
+        };
         let recorder_opt = {
             let mut guard = sess.services.rollout.lock().await;
             guard.take()
@@ -4621,7 +4629,7 @@ mod handlers {
                 triggered_at: chrono::Utc::now(),
                 hook_event: codex_hooks::HookEvent::SessionEnd {
                     event: codex_hooks::HookEventLifecycle {
-                        session_ref: sess.conversation_id.to_string(),
+                        session_ref: hook_session_ref,
                         previous_session_id: None,
                         prompt: None,
                         response_message: None,
@@ -4880,6 +4888,14 @@ fn hooks_config_from_config(config: &Config) -> HooksConfig {
     }
 }
 
+pub(crate) async fn compute_hook_session_ref(session: &Session) -> String {
+    let rollout = session.services.rollout.lock().await;
+    rollout
+        .as_ref()
+        .map(|recorder| recorder.rollout_path().display().to_string())
+        .unwrap_or_else(|| session.conversation_id.to_string())
+}
+
 pub(crate) async fn dispatch_nonfatal_lifecycle_hook(session: &Session, hook_payload: HookPayload) {
     let hook_event = hook_payload.hook_event.name();
     let hook_outcomes = session.hooks().dispatch(hook_payload).await;
@@ -4949,6 +4965,7 @@ pub(crate) async fn run_turn(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let hook_session_ref = compute_hook_session_ref(sess.as_ref()).await;
     dispatch_nonfatal_lifecycle_hook(
         sess.as_ref(),
         HookPayload {
@@ -4958,7 +4975,7 @@ pub(crate) async fn run_turn(
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::TurnStart {
                 event: HookEventLifecycle {
-                    session_ref: sess.conversation_id.to_string(),
+                    session_ref: hook_session_ref,
                     previous_session_id: None,
                     prompt: (!prompt.is_empty()).then_some(prompt),
                     response_message: None,
@@ -5221,6 +5238,7 @@ pub(crate) async fn run_turn(
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
                     let turn_end_prompt = sampling_request_input_messages.last().cloned();
+                    let hook_session_ref = compute_hook_session_ref(sess.as_ref()).await;
                     dispatch_nonfatal_lifecycle_hook(
                         sess.as_ref(),
                         HookPayload {
@@ -5230,7 +5248,7 @@ pub(crate) async fn run_turn(
                             triggered_at: chrono::Utc::now(),
                             hook_event: HookEvent::TurnEnd {
                                 event: HookEventLifecycle {
-                                    session_ref: sess.conversation_id.to_string(),
+                                    session_ref: hook_session_ref,
                                     previous_session_id: None,
                                     prompt: turn_end_prompt,
                                     response_message: None,
@@ -5436,6 +5454,7 @@ async fn run_auto_compact(
         )
         .await?;
     }
+    let hook_session_ref = compute_hook_session_ref(sess.as_ref()).await;
     dispatch_nonfatal_lifecycle_hook(
         sess.as_ref(),
         HookPayload {
@@ -5445,7 +5464,7 @@ async fn run_auto_compact(
             triggered_at: chrono::Utc::now(),
             hook_event: HookEvent::Compaction {
                 event: HookEventLifecycle {
-                    session_ref: sess.conversation_id.to_string(),
+                    session_ref: hook_session_ref,
                     previous_session_id: None,
                     prompt: Some(turn_context.compact_prompt().to_string()),
                     response_message: None,

@@ -611,7 +611,7 @@
     },
     "HooksToml": {
       "additionalProperties": false,
-      "description": "Base config deserialized from ~/.codex/config.toml.",
+      "description": "Lifecycle hook command config deserialized from `[hooks]` in config.toml.",
       "properties": {
         "compaction": {
           "items": {
