@@ -57,6 +57,7 @@ use chrono::Local;
 use chrono::Utc;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
+use codex_hooks::HookEventLifecycle;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
@@ -1435,9 +1436,7 @@ impl Session {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
-            }),
+            hooks: Hooks::new(hooks_config_from_config(config.as_ref())),
             rollout: Mutex::new(rollout_recorder),
             user_shell: Arc::new(default_shell),
             shell_snapshot_tx,
@@ -1514,6 +1513,28 @@ impl Session {
         for event in events {
             sess.send_event_raw(event).await;
         }
+        dispatch_nonfatal_lifecycle_hook(
+            sess.as_ref(),
+            HookPayload {
+                session_id: conversation_id,
+                cwd: session_configuration.cwd.clone(),
+                client: None,
+                triggered_at: chrono::Utc::now(),
+                hook_event: HookEvent::SessionStart {
+                    event: HookEventLifecycle {
+                        session_ref: conversation_id.to_string(),
+                        previous_session_id: None,
+                        prompt: None,
+                        response_message: None,
+                        tool_use_id: None,
+                        tool_input: None,
+                        subagent_id: None,
+                        metadata: None,
+                    },
+                },
+            },
+        )
+        .await;
 
         // Start the watcher after SessionConfigured so it cannot emit earlier events.
         sess.start_file_watcher_listener();
@@ -4567,6 +4588,10 @@ mod handlers {
             i64::try_from(turn_count).unwrap_or(0),
             &[],
         );
+        let cwd = {
+            let state = sess.state.lock().await;
+            state.session_configuration.cwd.clone()
+        };
 
         // Gracefully flush and shutdown rollout recorder on session end so tests
         // that inspect the rollout file do not race with the background writer.
@@ -4587,6 +4612,28 @@ mod handlers {
             };
             sess.send_event_raw(event).await;
         }
+        super::dispatch_nonfatal_lifecycle_hook(
+            sess.as_ref(),
+            codex_hooks::HookPayload {
+                session_id: sess.conversation_id,
+                cwd,
+                client: None,
+                triggered_at: chrono::Utc::now(),
+                hook_event: codex_hooks::HookEvent::SessionEnd {
+                    event: codex_hooks::HookEventLifecycle {
+                        session_ref: sess.conversation_id.to_string(),
+                        previous_session_id: None,
+                        prompt: None,
+                        response_message: None,
+                        tool_use_id: None,
+                        tool_input: None,
+                        subagent_id: None,
+                        metadata: None,
+                    },
+                },
+            },
+        )
+        .await;
 
         let event = Event {
             id: sub_id,
@@ -4820,6 +4867,46 @@ fn errors_to_info(errors: &[SkillError]) -> Vec<SkillErrorInfo> {
         .collect()
 }
 
+fn hooks_config_from_config(config: &Config) -> HooksConfig {
+    HooksConfig {
+        legacy_notify_argv: config.notify.clone(),
+        session_start_argv: config.hooks.session_start.clone(),
+        turn_start_argv: config.hooks.turn_start.clone(),
+        turn_end_argv: config.hooks.turn_end.clone(),
+        compaction_argv: config.hooks.compaction.clone(),
+        session_end_argv: config.hooks.session_end.clone(),
+        subagent_start_argv: config.hooks.subagent_start.clone(),
+        subagent_end_argv: config.hooks.subagent_end.clone(),
+    }
+}
+
+pub(crate) async fn dispatch_nonfatal_lifecycle_hook(session: &Session, hook_payload: HookPayload) {
+    let hook_event = hook_payload.hook_event.name();
+    let hook_outcomes = session.hooks().dispatch(hook_payload).await;
+    for hook_outcome in hook_outcomes {
+        let hook_name = hook_outcome.hook_name;
+        match hook_outcome.result {
+            HookResult::Success => {}
+            HookResult::FailedContinue(error) => {
+                warn!(
+                    hook_event = %hook_event,
+                    hook_name = %hook_name,
+                    error = %error,
+                    "lifecycle hook failed; continuing"
+                );
+            }
+            HookResult::FailedAbort(error) => {
+                warn!(
+                    hook_event = %hook_event,
+                    hook_name = %hook_name,
+                    error = %error,
+                    "lifecycle hook failed with abort; continuing"
+                );
+            }
+        }
+    }
+}
+
 /// Takes a user message as input and runs a loop where, at each sampling request, the model
 /// replies with either:
 ///
@@ -4854,6 +4941,36 @@ pub(crate) async fn run_turn(
         collaboration_mode_kind: turn_context.collaboration_mode.mode,
     });
     sess.send_event(&turn_context, event).await;
+    let prompt = input
+        .iter()
+        .filter_map(|item| match item {
+            UserInput::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    dispatch_nonfatal_lifecycle_hook(
+        sess.as_ref(),
+        HookPayload {
+            session_id: sess.conversation_id,
+            cwd: turn_context.cwd.clone(),
+            client: turn_context.app_server_client_name.clone(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::TurnStart {
+                event: HookEventLifecycle {
+                    session_ref: sess.conversation_id.to_string(),
+                    previous_session_id: None,
+                    prompt: (!prompt.is_empty()).then_some(prompt),
+                    response_message: None,
+                    tool_use_id: None,
+                    tool_input: None,
+                    subagent_id: None,
+                    metadata: None,
+                },
+            },
+        },
+    )
+    .await;
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -5103,6 +5220,29 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    let turn_end_prompt = sampling_request_input_messages.last().cloned();
+                    dispatch_nonfatal_lifecycle_hook(
+                        sess.as_ref(),
+                        HookPayload {
+                            session_id: sess.conversation_id,
+                            cwd: turn_context.cwd.clone(),
+                            client: turn_context.app_server_client_name.clone(),
+                            triggered_at: chrono::Utc::now(),
+                            hook_event: HookEvent::TurnEnd {
+                                event: HookEventLifecycle {
+                                    session_ref: sess.conversation_id.to_string(),
+                                    previous_session_id: None,
+                                    prompt: turn_end_prompt,
+                                    response_message: None,
+                                    tool_use_id: None,
+                                    tool_input: None,
+                                    subagent_id: None,
+                                    metadata: None,
+                                },
+                            },
+                        },
+                    )
+                    .await;
                     let hook_outcomes = sess
                         .hooks()
                         .dispatch(HookPayload {
@@ -5296,6 +5436,28 @@ async fn run_auto_compact(
         )
         .await?;
     }
+    dispatch_nonfatal_lifecycle_hook(
+        sess.as_ref(),
+        HookPayload {
+            session_id: sess.conversation_id,
+            cwd: turn_context.cwd.clone(),
+            client: turn_context.app_server_client_name.clone(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::Compaction {
+                event: HookEventLifecycle {
+                    session_ref: sess.conversation_id.to_string(),
+                    previous_session_id: None,
+                    prompt: Some(turn_context.compact_prompt().to_string()),
+                    response_message: None,
+                    tool_use_id: None,
+                    tool_input: None,
+                    subagent_id: None,
+                    metadata: None,
+                },
+            },
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -8497,9 +8659,7 @@ mod tests {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
-            }),
+            hooks: Hooks::new(hooks_config_from_config(config.as_ref())),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
             shell_snapshot_tx: watch::channel(None).0,
@@ -8657,9 +8817,7 @@ mod tests {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
-            }),
+            hooks: Hooks::new(hooks_config_from_config(config.as_ref())),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
             shell_snapshot_tx: watch::channel(None).0,

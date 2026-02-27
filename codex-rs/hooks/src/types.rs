@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -137,6 +138,26 @@ pub struct HookEventAfterToolUse {
     pub output_preview: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct HookEventLifecycle {
+    pub session_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_session_id: Option<ThreadId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<HookToolInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_id: Option<ThreadId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
+}
+
 fn serialize_triggered_at<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -155,6 +176,50 @@ pub enum HookEvent {
         #[serde(flatten)]
         event: HookEventAfterToolUse,
     },
+    SessionStart {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+    TurnStart {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+    TurnEnd {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+    Compaction {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+    SessionEnd {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+    SubagentStart {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+    SubagentEnd {
+        #[serde(flatten)]
+        event: HookEventLifecycle,
+    },
+}
+
+impl HookEvent {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AfterAgent { .. } => "after_agent",
+            Self::AfterToolUse { .. } => "after_tool_use",
+            Self::SessionStart { .. } => "session_start",
+            Self::TurnStart { .. } => "turn_start",
+            Self::TurnEnd { .. } => "turn_end",
+            Self::Compaction { .. } => "compaction",
+            Self::SessionEnd { .. } => "session_end",
+            Self::SubagentStart { .. } => "subagent_start",
+            Self::SubagentEnd { .. } => "subagent_end",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +236,7 @@ mod tests {
     use super::HookEvent;
     use super::HookEventAfterAgent;
     use super::HookEventAfterToolUse;
+    use super::HookEventLifecycle;
     use super::HookPayload;
     use super::HookToolInput;
     use super::HookToolInputLocalShell;
@@ -282,6 +348,47 @@ mod tests {
                 "sandbox": "none",
                 "sandbox_policy": "danger-full-access",
                 "output_preview": "ok",
+            },
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn lifecycle_payload_serializes_stable_wire_shape() {
+        let session_id = ThreadId::new();
+        let payload = HookPayload {
+            session_id,
+            cwd: PathBuf::from("tmp"),
+            client: Some("codex-tui".to_string()),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::TurnStart {
+                event: HookEventLifecycle {
+                    session_ref: "session-ref-1".to_string(),
+                    previous_session_id: None,
+                    prompt: Some("hello world".to_string()),
+                    response_message: None,
+                    tool_use_id: None,
+                    tool_input: None,
+                    subagent_id: None,
+                    metadata: None,
+                },
+            },
+        };
+
+        let actual = serde_json::to_value(payload).expect("serialize hook payload");
+        let expected = json!({
+            "session_id": session_id.to_string(),
+            "cwd": "tmp",
+            "client": "codex-tui",
+            "triggered_at": "2025-01-01T00:00:00Z",
+            "hook_event": {
+                "event_type": "turn_start",
+                "session_ref": "session-ref-1",
+                "prompt": "hello world",
             },
         });
 

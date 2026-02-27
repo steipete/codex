@@ -1,19 +1,37 @@
+use std::process::Stdio;
+use std::sync::Arc;
+
 use tokio::process::Command;
 
 use crate::types::Hook;
 use crate::types::HookEvent;
 use crate::types::HookPayload;
 use crate::types::HookResponse;
+use crate::types::HookResult;
 
 #[derive(Default, Clone)]
 pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
+    pub session_start_argv: Option<Vec<String>>,
+    pub turn_start_argv: Option<Vec<String>>,
+    pub turn_end_argv: Option<Vec<String>>,
+    pub compaction_argv: Option<Vec<String>>,
+    pub session_end_argv: Option<Vec<String>>,
+    pub subagent_start_argv: Option<Vec<String>>,
+    pub subagent_end_argv: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
 pub struct Hooks {
     after_agent: Vec<Hook>,
     after_tool_use: Vec<Hook>,
+    session_start: Vec<Hook>,
+    turn_start: Vec<Hook>,
+    turn_end: Vec<Hook>,
+    compaction: Vec<Hook>,
+    session_end: Vec<Hook>,
+    subagent_start: Vec<Hook>,
+    subagent_end: Vec<Hook>,
 }
 
 impl Default for Hooks {
@@ -32,9 +50,59 @@ impl Hooks {
             .map(crate::notify_hook)
             .into_iter()
             .collect();
+
+        let session_start = config
+            .session_start_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("session_start", argv))
+            .into_iter()
+            .collect();
+        let turn_start = config
+            .turn_start_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("turn_start", argv))
+            .into_iter()
+            .collect();
+        let turn_end = config
+            .turn_end_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("turn_end", argv))
+            .into_iter()
+            .collect();
+        let compaction = config
+            .compaction_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("compaction", argv))
+            .into_iter()
+            .collect();
+        let session_end = config
+            .session_end_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("session_end", argv))
+            .into_iter()
+            .collect();
+        let subagent_start = config
+            .subagent_start_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("subagent_start", argv))
+            .into_iter()
+            .collect();
+        let subagent_end = config
+            .subagent_end_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+            .map(|argv| command_hook("subagent_end", argv))
+            .into_iter()
+            .collect();
         Self {
             after_agent,
             after_tool_use: Vec::new(),
+            session_start,
+            turn_start,
+            turn_end,
+            compaction,
+            session_end,
+            subagent_start,
+            subagent_end,
         }
     }
 
@@ -42,6 +110,13 @@ impl Hooks {
         match hook_event {
             HookEvent::AfterAgent { .. } => &self.after_agent,
             HookEvent::AfterToolUse { .. } => &self.after_tool_use,
+            HookEvent::SessionStart { .. } => &self.session_start,
+            HookEvent::TurnStart { .. } => &self.turn_start,
+            HookEvent::TurnEnd { .. } => &self.turn_end,
+            HookEvent::Compaction { .. } => &self.compaction,
+            HookEvent::SessionEnd { .. } => &self.session_end,
+            HookEvent::SubagentStart { .. } => &self.subagent_start,
+            HookEvent::SubagentEnd { .. } => &self.subagent_end,
         }
     }
 
@@ -71,6 +146,36 @@ pub fn command_from_argv(argv: &[String]) -> Option<Command> {
     Some(command)
 }
 
+fn command_hook(name: &str, argv: Vec<String>) -> Hook {
+    let hook_name = name.to_string();
+    let argv = Arc::new(argv);
+    Hook {
+        name: hook_name,
+        func: Arc::new(move |payload: &HookPayload| {
+            let argv = Arc::clone(&argv);
+            Box::pin(async move {
+                let mut command = match command_from_argv(&argv) {
+                    Some(command) => command,
+                    None => return HookResult::Success,
+                };
+                let payload_json = match serde_json::to_string(payload) {
+                    Ok(payload_json) => payload_json,
+                    Err(err) => return HookResult::FailedContinue(err.into()),
+                };
+                command.arg(payload_json);
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                match command.spawn() {
+                    Ok(_) => HookResult::Success,
+                    Err(err) => HookResult::FailedContinue(err.into()),
+                }
+            })
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -93,6 +198,7 @@ mod tests {
     use super::*;
     use crate::types::HookEventAfterAgent;
     use crate::types::HookEventAfterToolUse;
+    use crate::types::HookEventLifecycle;
     use crate::types::HookResult;
     use crate::types::HookToolInput;
     use crate::types::HookToolKind;
@@ -199,6 +305,19 @@ mod tests {
         }
     }
 
+    fn lifecycle_payload(event: HookEvent) -> HookPayload {
+        HookPayload {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from(CWD),
+            client: Some("codex-tui".to_string()),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: event,
+        }
+    }
+
     #[test]
     fn command_from_argv_returns_none_for_empty_args() {
         assert!(command_from_argv(&[]).is_none());
@@ -231,6 +350,7 @@ mod tests {
         assert!(
             Hooks::new(HooksConfig {
                 legacy_notify_argv: Some(vec![]),
+                ..HooksConfig::default()
             })
             .after_agent
             .is_empty()
@@ -238,6 +358,7 @@ mod tests {
         assert!(
             Hooks::new(HooksConfig {
                 legacy_notify_argv: Some(vec!["".to_string()]),
+                ..HooksConfig::default()
             })
             .after_agent
             .is_empty()
@@ -245,8 +366,26 @@ mod tests {
         assert_eq!(
             Hooks::new(HooksConfig {
                 legacy_notify_argv: Some(vec!["notify-send".to_string()]),
+                ..HooksConfig::default()
             })
             .after_agent
+            .len(),
+            1
+        );
+        assert!(
+            Hooks::new(HooksConfig {
+                session_start_argv: Some(vec!["".to_string()]),
+                ..HooksConfig::default()
+            })
+            .session_start
+            .is_empty()
+        );
+        assert_eq!(
+            Hooks::new(HooksConfig {
+                session_start_argv: Some(vec!["hooks-cli".to_string()]),
+                ..HooksConfig::default()
+            })
+            .session_start
             .len(),
             1
         );
@@ -322,6 +461,34 @@ mod tests {
         };
 
         let outcomes = hooks.dispatch(after_tool_use_payload("p")).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].hook_name, "counting");
+        assert!(matches!(outcomes[0].result, HookResult::Success));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_executes_lifecycle_hooks() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hooks = Hooks {
+            session_start: vec![counting_success_hook(&calls, "counting")],
+            ..Hooks::default()
+        };
+
+        let outcomes = hooks
+            .dispatch(lifecycle_payload(HookEvent::SessionStart {
+                event: HookEventLifecycle {
+                    session_ref: "session-ref".to_string(),
+                    previous_session_id: None,
+                    prompt: None,
+                    response_message: None,
+                    tool_use_id: None,
+                    tool_input: None,
+                    subagent_id: None,
+                    metadata: None,
+                },
+            }))
+            .await;
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].hook_name, "counting");
         assert!(matches!(outcomes[0].result, HookResult::Success));

@@ -26,6 +26,23 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 When Codex knows which client started the turn, the legacy notify JSON payload also includes a top-level `client` field. The TUI reports `codex-tui`, and the app server reports the `clientInfo.name` value from `initialize`.
 
+## Lifecycle Hooks
+
+Codex can run command hooks for lifecycle events via `[hooks]` in `~/.codex/config.toml`:
+
+```toml
+[hooks]
+session_start = ["my-hook", "session_start"]
+turn_start = ["my-hook", "turn_start"]
+turn_end = ["my-hook", "turn_end"]
+compaction = ["my-hook", "compaction"]
+session_end = ["my-hook", "session_end"]
+subagent_start = ["my-hook", "subagent_start"]
+subagent_end = ["my-hook", "subagent_end"]
+```
+
+Each command receives one extra final argv argument with JSON describing the hook payload.
+
 ## JSON Schema
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
