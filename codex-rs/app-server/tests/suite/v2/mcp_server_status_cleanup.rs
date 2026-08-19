@@ -32,6 +32,12 @@ use tokio::time::timeout;
 const SERVER_COUNT: usize = 4;
 const TEST_TIMEOUT: Duration = Duration::from_secs(40);
 
+struct ProcessRecord {
+    leader: u32,
+    descendant: u32,
+    process_group: u32,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_and_concurrent_status_lists_drain_resistant_stdio_process_groups() -> Result<()> {
     let responses_server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
@@ -200,7 +206,7 @@ MCP_TEST_RESISTANT_DESCENDANT_RECORD_DIR = {}
     Ok(())
 }
 
-async fn wait_for_process_records(root: &Path, expected: usize) -> Result<Vec<u32>> {
+async fn wait_for_process_records(root: &Path, expected: usize) -> Result<Vec<ProcessRecord>> {
     timeout(TEST_TIMEOUT, async {
         loop {
             let records = process_records(root)?;
@@ -213,7 +219,7 @@ async fn wait_for_process_records(root: &Path, expected: usize) -> Result<Vec<u3
     .await?
 }
 
-fn process_records(root: &Path) -> Result<Vec<u32>> {
+fn process_records(root: &Path) -> Result<Vec<ProcessRecord>> {
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -236,24 +242,24 @@ fn process_records(root: &Path) -> Result<Vec<u32>> {
         .into_iter()
         .map(|path| {
             let contents = std::fs::read_to_string(&path)?;
-            let process_group = contents
-                .split_whitespace()
-                .nth(2)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("invalid process record in {}: {contents:?}", path.display())
-                })?
-                .parse()?;
-            Ok(process_group)
+            let mut fields = contents.split_whitespace();
+            let invalid_record =
+                || anyhow::anyhow!("invalid process record in {}: {contents:?}", path.display());
+            Ok(ProcessRecord {
+                leader: fields.next().ok_or_else(&invalid_record)?.parse()?,
+                descendant: fields.next().ok_or_else(&invalid_record)?.parse()?,
+                process_group: fields.next().ok_or_else(invalid_record)?.parse()?,
+            })
         })
         .collect()
 }
 
-fn assert_process_groups_drained(records: &[u32]) -> Result<()> {
+fn assert_process_groups_drained(records: &[ProcessRecord]) -> Result<()> {
     assert_eq!(live_tracked_processes(records)?, Vec::<String>::new());
     Ok(())
 }
 
-async fn wait_for_process_groups_drained(records: &[u32]) -> Result<()> {
+async fn wait_for_process_groups_drained(records: &[ProcessRecord]) -> Result<()> {
     timeout(TEST_TIMEOUT, async {
         loop {
             let live = live_tracked_processes(records)?;
@@ -269,8 +275,15 @@ async fn wait_for_process_groups_drained(records: &[u32]) -> Result<()> {
     .await?
 }
 
-fn live_tracked_processes(records: &[u32]) -> Result<Vec<String>> {
-    let process_groups = records.iter().copied().collect::<BTreeSet<_>>();
+fn live_tracked_processes(records: &[ProcessRecord]) -> Result<Vec<String>> {
+    let process_ids = records
+        .iter()
+        .flat_map(|record| [record.leader, record.descendant])
+        .collect::<BTreeSet<_>>();
+    let process_groups = records
+        .iter()
+        .map(|record| record.process_group)
+        .collect::<BTreeSet<_>>();
     let output = Command::new("/bin/ps")
         .args(["-axo", "pid=,pgid=,stat="])
         .output()
@@ -283,10 +296,9 @@ fn live_tracked_processes(records: &[u32]) -> Result<Vec<String>> {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            fields.next()?;
+            let process_id = fields.next()?.parse::<u32>().ok()?;
             let process_group = fields.next()?.parse::<u32>().ok()?;
-            process_groups
-                .contains(&process_group)
+            (process_ids.contains(&process_id) || process_groups.contains(&process_group))
                 .then(|| line.trim().to_string())
         })
         .collect())

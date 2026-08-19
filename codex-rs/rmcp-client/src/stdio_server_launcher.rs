@@ -24,10 +24,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 #[cfg(unix)]
-use std::thread::sleep;
-#[cfg(unix)]
-use std::thread::spawn;
-#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::Result;
@@ -455,21 +451,11 @@ impl LocalProcessTerminator {
     #[cfg(unix)]
     fn terminate_on_drop(&self) {
         let process_group_id = self.process_group_id;
-        match terminate_process_group(process_group_id) {
-            Ok(true) => {
-                // Drop cannot await the grace period, so retain the existing best-effort fallback.
-                // Explicit shutdown uses `terminate` above and waits for the group to disappear.
-                spawn(move || {
-                    sleep(PROCESS_GROUP_TERM_GRACE_PERIOD);
-                    if let Err(error) = kill_process_group(process_group_id) {
-                        warn!("Failed to kill MCP process group {process_group_id}: {error}");
-                    }
-                });
-            }
-            Ok(false) => {}
-            Err(error) => {
-                warn!("Failed to terminate MCP process group {process_group_id}: {error}");
-            }
+        // Drop cannot hold exact process ownership across a grace period: once
+        // this handle is gone, a delayed numeric PGID could target a reused
+        // group. Explicit shutdown uses `terminate` above and waits.
+        if let Err(error) = kill_process_group(process_group_id) {
+            warn!("Failed to kill MCP process group {process_group_id}: {error}");
         }
     }
 
