@@ -116,6 +116,53 @@ async fn drop_kills_wrapper_process_group() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_shutdown_rearms_drop_cleanup() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let leader_pid_file = temp_dir.path().join("leader.pid");
+    let descendant_pid_file = temp_dir.path().join("descendant.pid");
+    let env = HashMap::from([
+        (
+            OsString::from("LEADER_PID_FILE"),
+            OsString::from(leader_pid_file.to_string_lossy().into_owned()),
+        ),
+        (
+            OsString::from("DESCENDANT_PID_FILE"),
+            OsString::from(descendant_pid_file.to_string_lossy().into_owned()),
+        ),
+    ]);
+    let client = Arc::new(
+        RmcpClient::new_stdio_client(
+            OsString::from("/bin/sh"),
+            vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "trap '' TERM HUP INT; echo $$ > \"$LEADER_PID_FILE\"; /bin/sh -c 'trap \"\" TERM HUP INT; while :; do /bin/sleep 300; done' & echo $! > \"$DESCENDANT_PID_FILE\"; cat >/dev/null",
+                ),
+            ],
+            Some(env),
+            &[],
+            /*cwd*/ None,
+            Arc::new(LocalStdioServerLauncher::new(std::env::current_dir()?)),
+        )
+        .await?,
+    );
+    let leader_pid = wait_for_pid_file(&leader_pid_file).await?;
+    let descendant_pid = wait_for_pid_file(&descendant_pid_file).await?;
+
+    let shutdown_client = Arc::clone(&client);
+    let shutdown_task = tokio::spawn(async move { shutdown_client.shutdown().await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(process_exists(leader_pid));
+    assert!(process_exists(descendant_pid));
+    shutdown_task.abort();
+    assert!(shutdown_task.await.is_err_and(|error| error.is_cancelled()));
+
+    drop(client);
+    wait_for_process_exit(leader_pid).await?;
+    wait_for_process_exit(descendant_pid).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_kills_initialized_stdio_server_with_in_flight_operation() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let server_pid_file = temp_dir.path().join("server.pid");

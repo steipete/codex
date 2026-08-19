@@ -247,6 +247,19 @@ struct StdioServerProcessHandleInner {
     terminated: AtomicBool,
 }
 
+struct TerminationFlagGuard<'a> {
+    terminated: &'a AtomicBool,
+    completed: bool,
+}
+
+impl Drop for TerminationFlagGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.terminated.store(false, Ordering::Release);
+        }
+    }
+}
+
 enum StdioServerProcessKind {
     Local(Option<LocalProcessTerminator>),
     Executor(Arc<dyn ExecProcess>),
@@ -513,24 +526,21 @@ impl StdioServerProcessHandle {
             return Ok(());
         }
 
-        match &self.inner.kind {
-            StdioServerProcessKind::Local(Some(terminator)) => {
-                if let Err(error) = terminator.terminate().await {
-                    self.inner.terminated.store(false, Ordering::Release);
-                    Err(error)
-                } else {
-                    Ok(())
-                }
-            }
+        let mut guard = TerminationFlagGuard {
+            terminated: &self.inner.terminated,
+            completed: false,
+        };
+        let result = match &self.inner.kind {
+            StdioServerProcessKind::Local(Some(terminator)) => terminator.terminate().await,
             StdioServerProcessKind::Local(None) => Ok(()),
-            StdioServerProcessKind::Executor(process) => match process.terminate().await {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    self.inner.terminated.store(false, Ordering::Release);
-                    Err(io::Error::other(error))
-                }
-            },
+            StdioServerProcessKind::Executor(process) => {
+                process.terminate().await.map_err(io::Error::other)
+            }
+        };
+        if result.is_ok() {
+            guard.completed = true;
         }
+        result
     }
 }
 

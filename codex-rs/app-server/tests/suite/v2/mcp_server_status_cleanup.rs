@@ -38,6 +38,13 @@ struct ProcessRecord {
     process_group: u32,
 }
 
+#[derive(Clone, Copy)]
+enum InventoryBlock {
+    NoBlock,
+    Initialize,
+    ResourceList,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_and_concurrent_status_lists_drain_resistant_stdio_process_groups() -> Result<()> {
     let responses_server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
@@ -47,7 +54,7 @@ async fn repeated_and_concurrent_status_lists_drain_resistant_stdio_process_grou
         codex_home.path(),
         &responses_server.uri(),
         &records_root,
-        /*block_resource_list*/ false,
+        InventoryBlock::NoBlock,
     )?;
 
     let mut app_server = TestAppServer::builder()
@@ -104,7 +111,16 @@ async fn repeated_and_concurrent_status_lists_drain_resistant_stdio_process_grou
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancelling_status_snapshot_drains_resistant_stdio_process_groups() -> Result<()> {
+async fn cancelling_during_startup_drains_resistant_stdio_process_groups() -> Result<()> {
+    assert_cancelling_snapshot_drains(InventoryBlock::Initialize).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_during_inventory_drains_resistant_stdio_process_groups() -> Result<()> {
+    assert_cancelling_snapshot_drains(InventoryBlock::ResourceList).await
+}
+
+async fn assert_cancelling_snapshot_drains(block: InventoryBlock) -> Result<()> {
     let responses_server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     let records_root = codex_home.path().join("mcp-processes");
@@ -112,7 +128,7 @@ async fn cancelling_status_snapshot_drains_resistant_stdio_process_groups() -> R
         codex_home.path(),
         &responses_server.uri(),
         &records_root,
-        /*block_resource_list*/ true,
+        block,
     )?;
 
     let config = ConfigBuilder::default()
@@ -141,16 +157,18 @@ async fn cancelling_status_snapshot_drains_resistant_stdio_process_groups() -> R
     });
 
     let records = wait_for_process_records(&records_root, SERVER_COUNT).await?;
-    timeout(TEST_TIMEOUT, async {
-        while !(0..SERVER_COUNT).all(|server_index| {
-            records_root
-                .join(format!("server-{server_index}/resource-list-started"))
-                .is_file()
-        }) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
+    if matches!(block, InventoryBlock::ResourceList) {
+        timeout(TEST_TIMEOUT, async {
+            while !(0..SERVER_COUNT).all(|server_index| {
+                records_root
+                    .join(format!("server-{server_index}/resource-list-started"))
+                    .is_file()
+            }) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+    }
     snapshot_task.abort();
     let cancellation = snapshot_task
         .await
@@ -172,14 +190,15 @@ fn write_resistant_mcp_config(
     codex_home: &Path,
     responses_server_uri: &str,
     records_root: &Path,
-    block_resource_list: bool,
+    block: InventoryBlock,
 ) -> Result<()> {
     let server_bin = stdio_server_bin()?;
     let mut mcp_config = String::new();
     for server_index in 0..SERVER_COUNT {
         let record_dir = records_root.join(format!("server-{server_index}"));
         let started_file = record_dir.join("resource-list-started");
-        let barrier_file = record_dir.join("release-resource-list");
+        let resource_barrier_file = record_dir.join("release-resource-list");
+        let initialize_barrier_file = record_dir.join("release-initialize");
         mcp_config.push_str(&format!(
             r#"
 [mcp_servers.resistant-{server_index}]
@@ -192,12 +211,17 @@ MCP_TEST_RESISTANT_DESCENDANT_RECORD_DIR = {}
             toml::Value::String(server_bin.clone()),
             toml::Value::String(record_dir.to_string_lossy().into_owned()),
         ));
-        if block_resource_list {
-            mcp_config.push_str(&format!(
+        match block {
+            InventoryBlock::NoBlock => {}
+            InventoryBlock::Initialize => mcp_config.push_str(&format!(
+                "MCP_TEST_INITIALIZE_BARRIER_FILE = {}\n",
+                toml::Value::String(initialize_barrier_file.to_string_lossy().into_owned()),
+            )),
+            InventoryBlock::ResourceList => mcp_config.push_str(&format!(
                 "MCP_TEST_RESOURCE_LIST_STARTED_FILE = {}\nMCP_TEST_RESOURCE_LIST_BARRIER_FILE = {}\n",
                 toml::Value::String(started_file.to_string_lossy().into_owned()),
-                toml::Value::String(barrier_file.to_string_lossy().into_owned()),
-            ));
+                toml::Value::String(resource_barrier_file.to_string_lossy().into_owned()),
+            )),
         }
     }
     MockResponsesConfig::new(responses_server_uri)

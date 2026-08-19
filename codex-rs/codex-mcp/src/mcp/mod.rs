@@ -348,11 +348,16 @@ struct TemporaryMcpConnectionSet {
 }
 
 impl TemporaryMcpConnectionSet {
-    fn new(connections: McpConnectionSet, startup_cancellation_token: CancellationToken) -> Self {
+    fn new(startup_cancellation_token: CancellationToken) -> Self {
         Self {
-            connections: Some(connections),
+            connections: None,
             startup_cancellation_token,
         }
+    }
+
+    fn attach(&mut self, connections: McpConnectionSet) {
+        debug_assert!(self.connections.is_none());
+        self.connections = Some(connections);
     }
 
     fn connections(&self) -> &McpConnectionSet {
@@ -401,6 +406,7 @@ pub async fn read_mcp_resource(
     let mut mcp_servers = effective_mcp_servers(config, auth);
     mcp_servers.retain(|name, _| name == server);
     let cancel_token = CancellationToken::new();
+    let mut manager = TemporaryMcpConnectionSet::new(cancel_token.clone());
     let mut runtime_config = config.clone();
     runtime_config.permission_profile = PermissionProfile::default();
     let connections = McpConnectionSet::new(
@@ -428,7 +434,7 @@ pub async fn read_mcp_resource(
         crate::elicitation::ElicitationRequestRouter::default(),
     )
     .await;
-    let manager = TemporaryMcpConnectionSet::new(connections, cancel_token);
+    manager.attach(connections);
 
     let result = manager.connections().read_resource(server, params).await;
     manager.finish(result).await
@@ -477,6 +483,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     let server_names = mcp_servers.keys().cloned().collect();
 
     let cancel_token = CancellationToken::new();
+    let mut mcp_connection_manager = TemporaryMcpConnectionSet::new(cancel_token.clone());
     let mut runtime_config = config.clone();
     runtime_config.permission_profile = PermissionProfile::default();
     let connections = McpConnectionSet::new(
@@ -504,7 +511,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         crate::elicitation::ElicitationRequestRouter::default(),
     )
     .await;
-    let mcp_connection_manager = TemporaryMcpConnectionSet::new(connections, cancel_token);
+    mcp_connection_manager.attach(connections);
 
     let snapshot = collect_mcp_server_status_snapshot_from_manager(
         mcp_connection_manager.connections(),
