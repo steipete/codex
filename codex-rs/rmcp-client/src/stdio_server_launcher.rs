@@ -221,6 +221,10 @@ impl StdioServerLauncher for LocalStdioServerLauncher {
 
 #[cfg(unix)]
 const PROCESS_GROUP_TERM_GRACE_PERIOD: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const PROCESS_GROUP_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+#[cfg(unix)]
+const PROCESS_GROUP_KILL_WAIT: Duration = Duration::from_secs(2);
 
 #[cfg(unix)]
 struct LocalProcessTerminator {
@@ -415,27 +419,68 @@ impl LocalProcessTerminator {
     }
 
     #[cfg(unix)]
-    fn terminate(&self) {
+    async fn terminate(&self) -> io::Result<()> {
         let process_group_id = self.process_group_id;
-        let should_escalate = match terminate_process_group(process_group_id) {
-            Ok(exists) => exists,
+        if !terminate_process_group(process_group_id)? {
+            return Ok(());
+        }
+
+        let term_deadline = tokio::time::Instant::now() + PROCESS_GROUP_TERM_GRACE_PERIOD;
+        loop {
+            tokio::time::sleep(PROCESS_GROUP_EXIT_POLL_INTERVAL).await;
+            if !terminate_process_group(process_group_id)? {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= term_deadline {
+                break;
+            }
+        }
+
+        kill_process_group(process_group_id)?;
+        let kill_deadline = tokio::time::Instant::now() + PROCESS_GROUP_KILL_WAIT;
+        loop {
+            tokio::time::sleep(PROCESS_GROUP_EXIT_POLL_INTERVAL).await;
+            if !terminate_process_group(process_group_id)? {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= kill_deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("MCP process group {process_group_id} did not exit after SIGKILL"),
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn terminate_on_drop(&self) {
+        let process_group_id = self.process_group_id;
+        match terminate_process_group(process_group_id) {
+            Ok(true) => {
+                // Drop cannot await the grace period, so retain the existing best-effort fallback.
+                // Explicit shutdown uses `terminate` above and waits for the group to disappear.
+                spawn(move || {
+                    sleep(PROCESS_GROUP_TERM_GRACE_PERIOD);
+                    if let Err(error) = kill_process_group(process_group_id) {
+                        warn!("Failed to kill MCP process group {process_group_id}: {error}");
+                    }
+                });
+            }
+            Ok(false) => {}
             Err(error) => {
                 warn!("Failed to terminate MCP process group {process_group_id}: {error}");
-                false
             }
-        };
-        if should_escalate {
-            spawn(move || {
-                sleep(PROCESS_GROUP_TERM_GRACE_PERIOD);
-                if let Err(error) = kill_process_group(process_group_id) {
-                    warn!("Failed to kill MCP process group {process_group_id}: {error}");
-                }
-            });
         }
     }
 
     #[cfg(windows)]
-    fn terminate(&self) {
+    async fn terminate(&self) -> io::Result<()> {
+        self.terminate_on_drop();
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn terminate_on_drop(&self) {
         let result = match self {
             Self::Job(job) => job.terminate(),
             Self::Process(process_handle) => {
@@ -448,7 +493,12 @@ impl LocalProcessTerminator {
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn terminate(&self) {}
+    async fn terminate(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn terminate_on_drop(&self) {}
 }
 
 impl StdioServerProcessHandle {
@@ -479,8 +529,12 @@ impl StdioServerProcessHandle {
 
         match &self.inner.kind {
             StdioServerProcessKind::Local(Some(terminator)) => {
-                terminator.terminate();
-                Ok(())
+                if let Err(error) = terminator.terminate().await {
+                    self.inner.terminated.store(false, Ordering::Release);
+                    Err(error)
+                } else {
+                    Ok(())
+                }
             }
             StdioServerProcessKind::Local(None) => Ok(()),
             StdioServerProcessKind::Executor(process) => match process.terminate().await {
@@ -502,7 +556,7 @@ impl Drop for StdioServerProcessHandleInner {
 
         match &self.kind {
             StdioServerProcessKind::Local(Some(terminator)) => {
-                terminator.terminate();
+                terminator.terminate_on_drop();
             }
             StdioServerProcessKind::Local(None) => {}
             StdioServerProcessKind::Executor(process) => {

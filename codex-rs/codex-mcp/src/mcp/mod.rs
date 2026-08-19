@@ -342,6 +342,53 @@ pub fn tool_plugin_provenance(config: &McpConfig) -> ToolPluginProvenance {
     ToolPluginProvenance::from_config(config)
 }
 
+struct TemporaryMcpConnectionSet {
+    connections: Option<McpConnectionSet>,
+    startup_cancellation_token: CancellationToken,
+}
+
+impl TemporaryMcpConnectionSet {
+    fn new(connections: McpConnectionSet, startup_cancellation_token: CancellationToken) -> Self {
+        Self {
+            connections: Some(connections),
+            startup_cancellation_token,
+        }
+    }
+
+    fn connections(&self) -> &McpConnectionSet {
+        match &self.connections {
+            Some(connections) => connections,
+            None => unreachable!("temporary MCP connections should exist until shutdown"),
+        }
+    }
+
+    async fn finish<T>(mut self, result: T) -> T {
+        self.startup_cancellation_token.cancel();
+        if let Some(connections) = self.connections.take() {
+            connections.shutdown().await;
+        }
+        result
+    }
+}
+
+impl Drop for TemporaryMcpConnectionSet {
+    fn drop(&mut self) {
+        self.startup_cancellation_token.cancel();
+        let Some(connections) = self.connections.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "could not schedule temporary MCP connection shutdown: no Tokio runtime"
+            );
+            return;
+        };
+        std::mem::drop(runtime.spawn(async move {
+            connections.shutdown().await;
+        }));
+    }
+}
+
 pub async fn read_mcp_resource(
     config: &McpConfig,
     auth: Option<&CodexAuth>,
@@ -356,7 +403,7 @@ pub async fn read_mcp_resource(
     let cancel_token = CancellationToken::new();
     let mut runtime_config = config.clone();
     runtime_config.permission_profile = PermissionProfile::default();
-    let manager = McpConnectionSet::new(
+    let connections = McpConnectionSet::new(
         /*previous*/ None,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
@@ -381,10 +428,10 @@ pub async fn read_mcp_resource(
         crate::elicitation::ElicitationRequestRouter::default(),
     )
     .await;
+    let manager = TemporaryMcpConnectionSet::new(connections, cancel_token);
 
-    let result = manager.read_resource(server, params).await;
-    cancel_token.cancel();
-    result
+    let result = manager.connections().read_resource(server, params).await;
+    manager.finish(result).await
 }
 
 #[derive(Debug, Clone)]
@@ -432,7 +479,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     let cancel_token = CancellationToken::new();
     let mut runtime_config = config.clone();
     runtime_config.permission_profile = PermissionProfile::default();
-    let mcp_connection_manager = McpConnectionSet::new(
+    let connections = McpConnectionSet::new(
         /*previous*/ None,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
@@ -457,18 +504,17 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         crate::elicitation::ElicitationRequestRouter::default(),
     )
     .await;
+    let mcp_connection_manager = TemporaryMcpConnectionSet::new(connections, cancel_token);
 
     let snapshot = collect_mcp_server_status_snapshot_from_manager(
-        &mcp_connection_manager,
+        mcp_connection_manager.connections(),
         auth_status_entries,
         server_names,
         detail,
     )
     .await;
 
-    cancel_token.cancel();
-
-    snapshot
+    mcp_connection_manager.finish(snapshot).await
 }
 
 /// The Responses API requires tool names to match `^[a-zA-Z0-9_-]+$`.

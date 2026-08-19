@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -52,6 +54,9 @@ const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 const APP_ONLY_CWD_MARKER_FILE_ENV: &str = "MCP_TEST_APP_ONLY_CWD_MARKER_FILE";
 const DYNAMIC_SERVER_METADATA_ENV: &str = "MCP_TEST_DYNAMIC_SERVER_METADATA";
 const INITIALIZE_BARRIER_FILE_ENV: &str = "MCP_TEST_INITIALIZE_BARRIER_FILE";
+const RESISTANT_DESCENDANT_RECORD_DIR_ENV: &str = "MCP_TEST_RESISTANT_DESCENDANT_RECORD_DIR";
+const RESOURCE_LIST_BARRIER_FILE_ENV: &str = "MCP_TEST_RESOURCE_LIST_BARRIER_FILE";
+const RESOURCE_LIST_STARTED_FILE_ENV: &str = "MCP_TEST_RESOURCE_LIST_STARTED_FILE";
 const SERVER_INSTRUCTIONS_ENV: &str = "MCP_TEST_SERVER_INSTRUCTIONS";
 
 fn dynamic_server_process_label() -> Option<String> {
@@ -577,7 +582,22 @@ impl ServerHandler for TestToolServer {
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
         let resources = self.resources.clone();
-        async move { Ok(ListResourcesResult::with_all_items((*resources).clone())) }
+        async move {
+            if let Ok(started_file) = std::env::var(RESOURCE_LIST_STARTED_FILE_ENV) {
+                std::fs::write(started_file, "started").map_err(|error| {
+                    McpError::internal_error(
+                        format!("failed to write resource list marker: {error}"),
+                        None,
+                    )
+                })?;
+            }
+            if let Ok(barrier_file) = std::env::var(RESOURCE_LIST_BARRIER_FILE_ENV) {
+                while !std::path::Path::new(&barrier_file).is_file() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            }
+            Ok(ListResourcesResult::with_all_items((*resources).clone()))
+        }
     }
 
     async fn list_resource_templates(
@@ -976,6 +996,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("starting rmcp test server");
+    #[cfg(unix)]
+    let _resistant_descendant = spawn_resistant_descendant()?;
     if let Ok(pid_file) = std::env::var("MCP_TEST_PID_FILE") {
         std::fs::write(pid_file, std::process::id().to_string())?;
     }
@@ -1025,4 +1047,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Drain background tasks to ensure clean shutdown.
     task::yield_now().await;
     Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_resistant_descendant() -> Result<Option<std::process::Child>, Box<dyn std::error::Error>> {
+    let Ok(record_dir) = std::env::var(RESISTANT_DESCENDANT_RECORD_DIR_ENV) else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&record_dir)?;
+    let descendant = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "trap '' TERM HUP INT; while :; do /bin/sleep 300; done",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let leader = std::process::id();
+    std::fs::write(
+        PathBuf::from(record_dir).join(leader.to_string()),
+        format!("{leader} {} {leader}\n", descendant.id()),
+    )?;
+    Ok(Some(descendant))
 }

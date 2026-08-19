@@ -68,6 +68,7 @@ use codex_protocol::protocol::McpStartupFailureReason;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
+use futures::future::join_all;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::watch;
@@ -817,9 +818,7 @@ impl McpConnectionSet {
             .collect::<Vec<_>>();
         // Keep cleanup alive if an interrupt cancels the refresh that requested it.
         let shutdown_task = tokio::spawn(async move {
-            for connection in connections {
-                connection.shutdown().await;
-            }
+            join_all(connections.iter().map(|connection| connection.shutdown())).await;
         });
         if let Err(error) = shutdown_task.await {
             warn!("MCP client shutdown task failed: {error}");

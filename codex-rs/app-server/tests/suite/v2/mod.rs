@@ -46,6 +46,8 @@ mod mcp_resource;
 mod mcp_resource_origin;
 mod mcp_server_elicitation;
 mod mcp_server_status;
+#[cfg(unix)]
+mod mcp_server_status_cleanup;
 mod mcp_tool;
 mod memory_reset;
 mod misalignment_policy;
