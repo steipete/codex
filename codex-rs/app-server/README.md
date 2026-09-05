@@ -3002,6 +3002,13 @@ For server-initiated request payloads, annotate the field the same way so schema
    just write-app-server-schema --experimental
    ```
 
+   These commands run the Python fixture helper through `just test`. The default
+   command regenerates the stable TypeScript/JSON fixtures and stable embedded
+   exports; `--experimental` regenerates only the experimental embedded exports.
+   Use `--schema-root DIR` to override the destination and `--prettier PATH` to
+   supply a formatter. Relative paths are resolved from `codex-rs` when using
+   these recipes.
+
 5. Verify the protocol crate:
 
    ```bash
