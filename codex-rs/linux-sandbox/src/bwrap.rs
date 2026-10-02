@@ -1217,39 +1217,50 @@ fn append_read_only_subpath_args(
     allowed_write_paths: &[PathBuf],
     daemon_directories: &BTreeSet<PathBuf>,
 ) -> Result<()> {
-    if let Some(metadata) = transient_empty_metadata_path(subpath)
-        && is_within_allowed_write_paths(subpath, allowed_write_paths)
-    {
-        // Another concurrent bwrap setup can leave an empty mount target at
-        // a missing metadata path. Treat it like the missing case instead of
-        // binding that transient host path as the stable source.
-        match metadata {
-            EmptyProtectedMetadataPath::File(metadata) => {
-                append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata)?;
-            }
-            EmptyProtectedMetadataPath::Directory(metadata) => {
-                append_existing_empty_directory_args(bwrap_args, subpath, &metadata);
-            }
-        }
-        return Ok(());
-    }
+    // Classify once: a concurrent sandbox can create or remove its synthetic
+    // mount target between checks, so a re-check must not change the decision.
+    append_classified_read_only_subpath_args(
+        bwrap_args,
+        subpath,
+        classify_read_only_subpath(subpath),
+        allowed_write_paths,
+        daemon_directories,
+    )
+}
 
-    if !subpath.exists() {
-        if let Some(first_missing_component) = find_first_non_existent_component(subpath)
-            && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
-        {
-            append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
+fn append_classified_read_only_subpath_args(
+    bwrap_args: &mut BwrapArgs,
+    subpath: &Path,
+    classification: ReadOnlySubpath,
+    allowed_write_paths: &[PathBuf],
+    daemon_directories: &BTreeSet<PathBuf>,
+) -> Result<()> {
+    match classification {
+        ReadOnlySubpath::Missing => {
+            // If every component exists by now, a concurrent sandbox created the
+            // target after classification; mask the path itself.
+            let first_missing_component =
+                find_first_non_existent_component(subpath).unwrap_or_else(|| subpath.to_path_buf());
+            if is_within_allowed_write_paths(&first_missing_component, allowed_write_paths) {
+                append_missing_read_only_subpath_args(bwrap_args, &first_missing_component)?;
+            }
+            Ok(())
         }
-        return Ok(());
+        _ if !is_within_allowed_write_paths(subpath, allowed_write_paths) => Ok(()),
+        ReadOnlySubpath::EmptyProtectedFile(metadata) => {
+            append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata)
+        }
+        ReadOnlySubpath::EmptyProtectedDirectory(metadata) => {
+            append_existing_empty_directory_args(bwrap_args, subpath, &metadata);
+            Ok(())
+        }
+        ReadOnlySubpath::Present => {
+            bwrap_args.args.push("--ro-bind".to_string());
+            bwrap_args.args.push(path_to_string(subpath));
+            bwrap_args.args.push(path_to_string(subpath));
+            append_daemon_socket_masks(&mut bwrap_args.args, subpath, daemon_directories)
+        }
     }
-
-    if is_within_allowed_write_paths(subpath, allowed_write_paths) {
-        bwrap_args.args.push("--ro-bind".to_string());
-        bwrap_args.args.push(path_to_string(subpath));
-        bwrap_args.args.push(path_to_string(subpath));
-        append_daemon_socket_masks(&mut bwrap_args.args, subpath, daemon_directories)?;
-    }
-    Ok(())
 }
 
 fn append_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
@@ -1402,33 +1413,43 @@ fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -
         .any(|root| path.starts_with(root))
 }
 
-enum EmptyProtectedMetadataPath {
-    File(Metadata),
-    Directory(Metadata),
+enum ReadOnlySubpath {
+    Missing,
+    EmptyProtectedFile(Metadata),
+    EmptyProtectedDirectory(Metadata),
+    Present,
 }
 
-fn transient_empty_metadata_path(path: &Path) -> Option<EmptyProtectedMetadataPath> {
-    if !path.file_name().is_some_and(is_protected_metadata_name) {
-        return None;
-    }
-
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_file() && metadata.len() == 0 {
-        return Some(EmptyProtectedMetadataPath::File(metadata));
-    }
-
-    if metadata.file_type().is_dir() && directory_is_empty(path) {
-        return Some(EmptyProtectedMetadataPath::Directory(metadata));
-    }
-
-    None
-}
-
-fn directory_is_empty(path: &Path) -> bool {
-    let Ok(mut entries) = fs::read_dir(path) else {
-        return false;
+fn classify_read_only_subpath(path: &Path) -> ReadOnlySubpath {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return ReadOnlySubpath::Missing;
     };
-    entries.next().is_none()
+    if metadata.file_type().is_symlink() {
+        return if fs::metadata(path).is_ok() {
+            ReadOnlySubpath::Present
+        } else {
+            ReadOnlySubpath::Missing
+        };
+    }
+
+    if !path.file_name().is_some_and(is_protected_metadata_name) {
+        return ReadOnlySubpath::Present;
+    }
+
+    if metadata.file_type().is_file() && metadata.len() == 0 {
+        return ReadOnlySubpath::EmptyProtectedFile(metadata);
+    }
+
+    if metadata.file_type().is_dir() {
+        // A directory removed after the lstat is still the missing case.
+        return match fs::read_dir(path).map(|mut entries| entries.next().is_none()) {
+            Ok(true) => ReadOnlySubpath::EmptyProtectedDirectory(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => ReadOnlySubpath::Missing,
+            Ok(false) | Err(_) => ReadOnlySubpath::Present,
+        };
+    }
+
+    ReadOnlySubpath::Present
 }
 
 fn first_writable_symlink_component_in_path(
@@ -1997,6 +2018,76 @@ mod tests {
         assert!(
             registry_bind.expect("registry read-only bind") < temp_mask.expect("temp deny mask"),
             "registry protection must not reopen denied temp paths"
+        );
+    }
+
+    #[test]
+    fn classifies_read_only_subpaths() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let dot_aws = temp_dir.path().join(".aws");
+        assert!(matches!(
+            classify_read_only_subpath(&dot_aws),
+            ReadOnlySubpath::Missing
+        ));
+
+        std::fs::create_dir(&dot_aws).expect("create empty .aws directory");
+        assert!(matches!(
+            classify_read_only_subpath(&dot_aws),
+            ReadOnlySubpath::EmptyProtectedDirectory(_)
+        ));
+
+        let dot_git = temp_dir.path().join(".git");
+        File::create(&dot_git).expect("create empty .git file");
+        assert!(matches!(
+            classify_read_only_subpath(&dot_git),
+            ReadOnlySubpath::EmptyProtectedFile(_)
+        ));
+
+        std::fs::write(dot_aws.join("config"), "config").expect("write .aws config");
+        assert!(matches!(
+            classify_read_only_subpath(&dot_aws),
+            ReadOnlySubpath::Present
+        ));
+
+        let ordinary = temp_dir.path().join("ordinary");
+        std::fs::create_dir(&ordinary).expect("create ordinary directory");
+        assert!(matches!(
+            classify_read_only_subpath(&ordinary),
+            ReadOnlySubpath::Present
+        ));
+    }
+
+    #[test]
+    fn missing_read_only_subpath_masks_target_created_after_classification() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let dot_aws = workspace.join(".aws");
+        std::fs::create_dir_all(&dot_aws).expect("create concurrent synthetic target");
+        let mut args = BwrapArgs {
+            args: Vec::new(),
+            preserved_files: Vec::new(),
+            synthetic_mount_targets: Vec::new(),
+            protected_create_targets: Vec::new(),
+        };
+
+        append_classified_read_only_subpath_args(
+            &mut args,
+            &dot_aws,
+            ReadOnlySubpath::Missing,
+            &[workspace],
+            &BTreeSet::new(),
+        )
+        .expect("read-only subpath args");
+
+        assert_empty_directory_mounted_read_only(&args.args, &dot_aws);
+        assert_eq!(synthetic_mount_target_paths(&args), vec![dot_aws.clone()]);
+        let dot_aws_str = path_to_string(&dot_aws);
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| window == ["--ro-bind", dot_aws_str.as_str(), dot_aws_str.as_str()]),
+            "a target created after classification must not become a stable bind source",
         );
     }
 
