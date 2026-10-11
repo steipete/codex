@@ -57,6 +57,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::time::Instant;
+use tracing::Instrument;
 use tracing::info;
 use tracing::warn;
 
@@ -360,7 +361,7 @@ impl LocalStdioServerLauncher {
         let stderr_reader = stderr.map(|stderr| {
             let program_name = program_name.clone();
             let (stop_tx, mut stop_rx) = watch::channel(());
-            std::mem::drop(tokio::spawn(async move {
+            let task = async move {
                 let mut reader = BufReader::new(stderr).lines();
                 // Give queued diagnostics time to reach the logs without waiting
                 // indefinitely for a descendant that still has stderr open.
@@ -391,7 +392,8 @@ impl LocalStdioServerLauncher {
                         },
                     }
                 }
-            }));
+            };
+            std::mem::drop(tokio::spawn(task.in_current_span()));
             stop_tx
         });
         let process = StdioServerProcessHandle::local(program_name, terminator, stderr_reader);

@@ -121,6 +121,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 use tracing::error;
 
 enum CommandExecutionApprovalPresentation {
@@ -656,7 +657,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             let (pending_request_id, rx) = outgoing
                 .send_request(ServerRequestPayload::FileChangeRequestApproval(params))
                 .await;
-            tokio::spawn(async move {
+            let task = async move {
                 on_file_change_request_approval_response(
                     item_id,
                     pending_request_id,
@@ -666,7 +667,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                     permission_guard,
                 )
                 .await;
-            });
+            };
+            tokio::spawn(task.in_current_span());
         }
         EventMsg::ExecApprovalRequest(ev) => {
             let permission_guard = thread_watch_manager
@@ -809,7 +811,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     params,
                 ))
                 .await;
-            tokio::spawn(async move {
+            let task = async move {
                 on_command_execution_request_approval_response(
                     event_turn_id,
                     conversation_id,
@@ -824,7 +826,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                     permission_guard,
                 )
                 .await;
-            });
+            };
+            tokio::spawn(task.in_current_span());
         }
         EventMsg::RequestUserInput(request) => {
             let user_input_guard = thread_watch_manager
@@ -861,7 +864,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             let (pending_request_id, rx) = outgoing
                 .send_request(ServerRequestPayload::ToolRequestUserInput(params))
                 .await;
-            tokio::spawn(async move {
+            let task = async move {
                 on_request_user_input_response(
                     event_turn_id,
                     pending_request_id,
@@ -871,7 +874,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                     user_input_guard,
                 )
                 .await;
-            });
+            };
+            tokio::spawn(task.in_current_span());
         }
         EventMsg::ElicitationRequest(request) => {
             let user_verification = matches!(
@@ -922,7 +926,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             let (pending_request_id, rx) = outgoing
                 .send_request(ServerRequestPayload::McpServerElicitationRequest(params))
                 .await;
-            tokio::spawn(async move {
+            let task = async move {
                 on_mcp_server_elicitation_response(
                     request.server_name,
                     request.id,
@@ -936,7 +940,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                     permission_guard,
                 )
                 .await;
-            });
+            };
+            tokio::spawn(task.in_current_span());
         }
         EventMsg::RequestPermissions(request) => {
             let permission_guard = thread_watch_manager
@@ -970,9 +975,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 receiver: rx,
                 request_permissions_guard: permission_guard,
             };
-            tokio::spawn(async move {
+            let task = async move {
                 on_request_permissions_response(pending_response, conversation, thread_state).await;
-            });
+            };
+            tokio::spawn(task.in_current_span());
         }
         EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
@@ -1113,9 +1119,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 let (_pending_request_id, rx) = outgoing
                     .send_request(ServerRequestPayload::DynamicToolCall(params))
                     .await;
-                tokio::spawn(async move {
+                let task = async move {
                     crate::dynamic_tools::on_call_response(call_id, rx, conversation).await;
-                });
+                };
+                tokio::spawn(task.in_current_span());
             }
         }
         EventMsg::ItemCompleted(event) => {

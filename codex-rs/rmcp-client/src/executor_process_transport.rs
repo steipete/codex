@@ -41,6 +41,8 @@ use serde_json::to_vec;
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
+use tracing::Instrument;
+use tracing::Span;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -175,6 +177,8 @@ pub(super) struct ExecutorProcessTransport {
 
     /// Human-readable program name used only in diagnostics.
     program_name: String,
+    /// rmcp polls the transport on its own task; retain the owning thread's scope.
+    span: Span,
 
     /// Buffered child stdout bytes that have not yet formed a complete
     /// newline-delimited JSON-RPC message.
@@ -211,6 +215,7 @@ impl ExecutorProcessTransport {
             stdin_write_semaphore: Arc::new(Semaphore::new(1)),
             events,
             program_name,
+            span: Span::current(),
             stdout: LineBuffer::default(),
             stderr: LineBuffer::new(MAX_MCP_STDERR_LINE_BYTES),
             closed: false,
@@ -264,7 +269,8 @@ impl Transport<RoleClient> for ExecutorProcessTransport {
     }
 
     fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleClient>>> + Send {
-        self.receive_message()
+        let span = self.span.clone();
+        self.receive_message().instrument(span)
     }
 
     async fn close(&mut self) -> std::result::Result<(), Self::Error> {

@@ -25,6 +25,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::timeout;
+use tracing::Instrument;
 use tracing::debug;
 use tracing::trace;
 
@@ -71,7 +72,7 @@ pub fn spawn_response_stream(
         let _ = turn_state.set(header_value.to_string());
     }
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
-    tokio::spawn(async move {
+    let task = async move {
         if let Some(model) = server_model {
             let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
         }
@@ -94,7 +95,8 @@ pub fn spawn_response_stream(
             safety_buffering_treatment,
         )
         .await;
-    });
+    };
+    tokio::spawn(task.in_current_span());
 
     ResponseStream {
         rx_event,

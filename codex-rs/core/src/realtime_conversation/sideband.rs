@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use tracing::Instrument;
 use tracing::info;
 use tracing::warn;
 
@@ -43,7 +44,7 @@ pub(super) fn spawn_webrtc_sideband_input_task(
         stop_token,
     } = input;
 
-    tokio::spawn(async move {
+    let task = async move {
         let mut reconnecting = false;
         let mut rapid_disconnects = 0_u32;
         let mut pending_outbound = None;
@@ -172,7 +173,8 @@ pub(super) fn spawn_webrtc_sideband_input_task(
 
         let transcript_tail = transcript_state.take_transcript_tail().await;
         flush_realtime_transcript_tail(&transcript_tail_flush, &transcript_tail).await;
-    })
+    };
+    tokio::spawn(task.in_current_span())
 }
 
 fn webrtc_sideband_session_ended(err: &ApiError) -> bool {

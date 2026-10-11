@@ -1863,6 +1863,7 @@ impl Config {
         }
 
         McpConfig {
+            ephemeral: self.ephemeral,
             chatgpt_base_url: self.chatgpt_base_url.clone(),
             apps_mcp_product_sku: self.apps_mcp_product_sku.clone(),
             requires_read_only_mcp_tools: false,

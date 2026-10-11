@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::Sleep;
+use tracing::Instrument;
 
 use super::SharedPluginMetricsSidecar;
 use super::UnifiedExecContext;
@@ -71,7 +72,7 @@ pub(crate) fn start_streaming_output(process: &UnifiedExecProcess, context: &Uni
         call_id: context.call_id.clone(),
     };
 
-    tokio::spawn(async move {
+    let task = async move {
         use tokio::sync::broadcast::error::RecvError;
 
         let mut output: Buffer = Buffer {
@@ -149,7 +150,8 @@ pub(crate) fn start_streaming_output(process: &UnifiedExecProcess, context: &Uni
 
         output.finish().await;
         output_drained.notify_one();
-    });
+    };
+    tokio::spawn(task.in_current_span());
 }
 
 /// Spawn a background watcher that waits for the PTY to exit and then emits a
@@ -176,7 +178,7 @@ pub(crate) fn spawn_exit_watcher(
     let output_drained = process.output_drained_notify();
     let interaction_lock = process.interaction_lock();
 
-    tokio::spawn(async move {
+    let task = async move {
         exit_token.cancelled().await;
         output_drained.notified().await;
         // Deferred network denial deliberately remains observable for a short
@@ -239,7 +241,8 @@ pub(crate) fn spawn_exit_watcher(
             )
             .await;
         }
-    });
+    };
+    tokio::spawn(task.in_current_span());
 }
 
 impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {

@@ -537,7 +537,11 @@ impl Session {
                 }
                 None => None,
             };
-            let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
+            let thread_spawn_span = info_span!(
+                "thread_spawn",
+                otel.name = "thread_spawn",
+                ephemeral = args.config.ephemeral,
+            );
             if let Some(trace) = parent_trace.as_ref() {
                 let _ = set_parent_from_w3c_trace_context(&thread_spawn_span, trace);
             }
@@ -983,9 +987,15 @@ impl Session {
             .as_ref()
             .and_then(|startup| startup.session_teardown(thread_id));
         let session_for_loop = Arc::clone(&session);
+        let session_span = info_span!(
+            parent: None,
+            "session_loop",
+            thread_id = %thread_id,
+            ephemeral = configured_config.ephemeral,
+        );
         let session_loop_handle = tokio::spawn(Box::pin(storage_originator.scope(async move {
             submission_loop(session_for_loop, configured_config, rx_sub)
-                .instrument(info_span!("session_loop", thread_id = %thread_id))
+                .instrument(session_span)
                 .await;
             if let Some(tree_teardown) = tree_teardown {
                 tree_teardown.complete();

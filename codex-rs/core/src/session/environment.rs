@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use tracing::Instrument;
 
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::MAX_SELECTED_CAPABILITY_ROOTS;
@@ -248,7 +249,7 @@ impl Session {
             let selection = starting.selection.clone();
             let session = Arc::downgrade(self);
             let mut status = self.agent_status.subscribe();
-            drop(tokio::spawn(async move {
+            let task = async move {
                 let result = tokio::select! {
                     result = configuration => result,
                     _ = status.wait_for(|status| matches!(status, AgentStatus::Shutdown)) => return,
@@ -267,7 +268,8 @@ impl Session {
                     // Unlike the external owner, no one will retry this child's one-time update.
                     let _ = apply(Err(error.to_string())).await;
                 }
-            }));
+            };
+            drop(tokio::spawn(task.in_current_span()));
         }
     }
 

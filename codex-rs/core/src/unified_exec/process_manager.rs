@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::oneshot::Completion;
@@ -430,7 +431,7 @@ fn terminate_process_on_network_denial(
 ) -> tokio::task::JoinHandle<()> {
     let network_cancelled = deferred.cancellation_token();
     let process_exited = process.cancellation_token();
-    tokio::spawn(async move {
+    let task = async move {
         let denied = tokio::select! {
             _ = network_cancelled.cancelled() => true,
             _ = process_exited.cancelled() => {
@@ -443,7 +444,8 @@ fn terminate_process_on_network_denial(
         let session = session.upgrade();
         let message = network_denial_message_for_session(session.as_ref(), Some(deferred)).await;
         process.fail_and_terminate(message);
-    })
+    };
+    tokio::spawn(task.in_current_span())
 }
 
 impl UnifiedExecProcessManager {

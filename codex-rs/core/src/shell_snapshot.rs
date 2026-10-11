@@ -275,13 +275,14 @@ impl ShellSnapshot {
         // Clean the (unlikely) leaked snapshot files.
         let codex_home = codex_home.clone();
         let cleanup_session_id = session_id;
-        tokio::spawn(async move {
+        let task = async move {
             if let Err(err) =
                 cleanup_stale_snapshots(&codex_home, cleanup_session_id, state_db).await
             {
                 tracing::warn!("Failed to clean up shell snapshots: {err:?}");
             }
-        });
+        };
+        tokio::spawn(task.in_current_span());
 
         // Make the new snapshot.
         let credentials = write_shell_snapshot(

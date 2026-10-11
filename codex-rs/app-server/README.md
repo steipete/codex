@@ -265,6 +265,10 @@ Failures use the normal JSON-RPC error envelope with closed `{type, reason}` dat
 `invalidRequest`, `unavailable`, `cancelled`, or `failed`. UI clients branch on
 these values rather than message text. Native diagnostic payloads stay private.
 
+## Ephemeral thread diagnostics
+
+Threads started or forked with `ephemeral: true` do not retain thread diagnostics in the SQLite log database or the feedback log buffer. This includes their submissions, model and tool processing, and app-server notifications. Persistent threads retain their submission summaries and scoped diagnostics. The process-shared code-mode host's raw stderr is summarized with a fixed diagnostic because it cannot be attributed to one thread. Explicitly configured console/file or telemetry subscribers have separate logging policies.
+
 ## Local rollout compression
 
 The experimental `rollout/compress` method takes no parameters and immediately

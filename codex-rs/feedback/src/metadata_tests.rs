@@ -9,6 +9,42 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[test]
+fn ephemeral_logs_and_metadata_are_excluded_without_sqlite() {
+    let feedback = CodexFeedback::new();
+    let _guard = tracing_subscriber::registry()
+        .with(feedback.logger_layer())
+        .with(feedback.metadata_layer())
+        .set_default();
+
+    tracing::info_span!("session_loop", ephemeral = false).in_scope(|| {
+        tracing::debug!("persistent sentinel");
+        tracing::info!(target: FEEDBACK_TAGS_TARGET, diagnostic = "persistent sentinel");
+    });
+    let private = tracing::info_span!("session_loop", ephemeral = tracing::field::Empty);
+    private.record("ephemeral", true);
+    private.in_scope(|| {
+        tracing::info_span!("tool", ephemeral = false).in_scope(|| {
+            tracing::error!("private sentinel");
+            tracing::info!(target: FEEDBACK_TAGS_TARGET, diagnostic = "private sentinel");
+        });
+    });
+    tracing::warn!(parent: &private, "private sentinel explicit parent");
+
+    let snapshot = feedback.snapshot(None);
+    let logs = String::from_utf8(snapshot.bytes.clone()).unwrap();
+    assert!(logs.contains("persistent sentinel"));
+    assert!(!logs.contains("private sentinel"));
+    assert_eq!(
+        snapshot.tags.get("diagnostic").unwrap(),
+        "persistent sentinel"
+    );
+    let event = snapshot.feedback_event(
+        "bug", /*reason*/ None, /*tags*/ None, /*session_source*/ None,
+    );
+    assert_eq!(event.tags.get("diagnostic").unwrap(), "persistent sentinel");
+}
+
+#[test]
 fn refreshing_logs_preserves_captured_metadata() {
     let feedback = CodexFeedback::new();
     let _guard = tracing_subscriber::registry()

@@ -13,6 +13,7 @@ mod audit;
 mod delegated_preview;
 mod extract;
 pub mod log_db;
+pub mod log_privacy;
 mod migrations;
 mod model;
 mod paths;

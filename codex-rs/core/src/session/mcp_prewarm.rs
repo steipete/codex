@@ -22,10 +22,11 @@ impl Session {
         self: &Arc<Self>,
         requests: async_channel::Receiver<()>,
         mut auth_changes: tokio::sync::watch::Receiver<u64>,
+        ephemeral: bool,
     ) {
         let session = Arc::downgrade(self);
         let shutdown = self.mcp_prewarm_shutdown.clone();
-        let worker = self.services.runtime_handle.spawn(async move {
+        let task = async move {
             loop {
                 let auth_changed = tokio::select! {
                     biased;
@@ -55,7 +56,9 @@ impl Session {
                     _ = session.refresh_mcp_if_dirty() => {},
                 }
             }
-        });
+        };
+        let span = info_span!(parent: None, "mcp_prewarm", thread_id = %self.thread_id, ephemeral);
+        let worker = self.services.runtime_handle.spawn(task.instrument(span));
         *self
             .mcp_prewarm_task
             .lock()

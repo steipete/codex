@@ -148,6 +148,35 @@ fn retained_read_response(chunks: Vec<ProcessOutputChunk>, next_seq: u64) -> Rea
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
+async fn stderr_keeps_the_owning_thread_scope_when_polled_by_rmcp() {
+    let process = Arc::new(RetainedReadProcess {
+        process_id: ProcessId::from("mcp-privacy-test"),
+        response: retained_read_response(Vec::new(), 0),
+    });
+    let mut transport = tracing::info_span!("ephemeral_mcp", ephemeral = true)
+        .in_scope(|| ExecutorProcessTransport::new(process, "test-server".to_string()));
+    transport
+        .stderr
+        .extend_from_slice(b"stderr sentinel")
+        .unwrap();
+    transport.closed = true;
+    // Match rmcp's detached receive task, after leaving the constructor's scope.
+    assert!(transport.receive().await.is_none());
+    logs_assert(|lines| {
+        let line = lines
+            .iter()
+            .find(|line| line.contains("stderr sentinel"))
+            .ok_or_else(|| "missing stderr diagnostic".to_string())?;
+        if line.contains("ephemeral_mcp{ephemeral=true}") {
+            Ok(())
+        } else {
+            Err(format!("stderr lost its privacy scope: {line}"))
+        }
+    });
+}
+
+#[tokio::test]
 async fn serializes_concurrent_stdin_writes() {
     let process = Arc::new(BlockingFirstWriteProcess {
         process_id: ProcessId::from("mcp-stdio-test"),

@@ -80,6 +80,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -1779,7 +1780,7 @@ async fn handle_start_inner(
     let sess_clone = Arc::clone(sess);
     let sub_id = sub_id.to_string();
     let fanout_realtime_active = Arc::clone(&realtime_active);
-    let fanout_task = tokio::spawn(async move {
+    let task = async move {
         let ev = |msg| Event {
             id: sub_id.clone(),
             msg,
@@ -1863,7 +1864,8 @@ async fn handle_start_inner(
                 .finish_if_active(&sess_clone, &fanout_realtime_active, sub_id, end)
                 .await;
         }
-    });
+    };
+    let fanout_task = tokio::spawn(task.in_current_span());
     sess.conversation
         .register_fanout_task(&realtime_active, fanout_task)
         .await;
@@ -2061,7 +2063,7 @@ fn spawn_realtime_input_task(
     input: RealtimeInputTask,
     transcript_tail_flush: RealtimeTranscriptTailFlush,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
+    let task = async move {
         let events_tx = input.events_tx.clone();
         let transcript_state = input.events.transcript_state();
         let exit = run_realtime_input_task(input, /*pending_outbound*/ None).await;
@@ -2070,7 +2072,8 @@ fn spawn_realtime_input_task(
         }
         let transcript_tail = transcript_state.take_transcript_tail().await;
         flush_realtime_transcript_tail(&transcript_tail_flush, &transcript_tail).await;
-    })
+    };
+    tokio::spawn(task.in_current_span())
 }
 
 enum RealtimeInputTaskExit {
@@ -2334,10 +2337,11 @@ fn schedule_streamed_handoff_flush(
     flush_delay: Duration,
 ) {
     let handoff = handoff.clone();
-    let _flush_task = tokio::spawn(async move {
+    let task = async move {
         tokio::time::sleep(flush_delay).await;
         flush_streamed_handoff_item(&handoff, &item_id).await;
-    });
+    };
+    let _flush_task = tokio::spawn(task.in_current_span());
 }
 
 fn v3_output_writer(

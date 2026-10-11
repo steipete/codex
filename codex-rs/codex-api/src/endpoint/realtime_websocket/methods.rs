@@ -50,6 +50,7 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tracing::Instrument;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -88,7 +89,7 @@ impl WsStream {
         let (tx_message, rx_message) = async_channel::unbounded::<Result<Message, WsError>>();
 
         let (terminal_policy_tx, terminal_policy_error) = tokio::sync::watch::channel(None);
-        let pump_task = tokio::spawn(async move {
+        let task = async move {
             let mut inner = inner;
             let report_write_policy_error = |error: &WsError| {
                 if let Some(denied) = codex_websocket_client::network_policy_denial(error) {
@@ -184,7 +185,8 @@ impl WsStream {
                 }
             }
             info!("realtime websocket pump exiting");
-        });
+        };
+        let pump_task = tokio::spawn(task.in_current_span());
 
         (
             Self {

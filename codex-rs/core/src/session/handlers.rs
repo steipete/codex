@@ -106,7 +106,7 @@ pub async fn run_user_shell_command(
         sess.active_turn_context_and_cancellation_token().await
     {
         let session = Arc::clone(sess);
-        tokio::spawn(async move {
+        let task = async move {
             execute_user_shell_command(
                 session,
                 turn_context,
@@ -116,7 +116,8 @@ pub async fn run_user_shell_command(
                 UserShellCommandMode::ActiveTurnAuxiliary,
             )
             .await;
-        });
+        };
+        tokio::spawn(task.in_current_span());
         return;
     }
 

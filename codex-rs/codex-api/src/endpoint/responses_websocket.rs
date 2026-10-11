@@ -65,7 +65,7 @@ impl WsStream {
         let (tx_command, mut rx_command) = mpsc::channel::<WsCommand>(32);
         let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
 
-        let pump_task = tokio::spawn(async move {
+        let task = async move {
             let mut inner = inner;
             loop {
                 tokio::select! {
@@ -116,7 +116,8 @@ impl WsStream {
                     }
                 }
             }
-        });
+        };
+        let pump_task = tokio::spawn(task.in_current_span());
 
         Self {
             tx_command,

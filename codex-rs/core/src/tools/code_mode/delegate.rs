@@ -129,7 +129,7 @@ impl CodeModeDispatchBroker {
         let dispatch_rx = self.dispatch_rx.clone();
         let dispatch_gates = Arc::clone(&self.dispatch_gates);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        tokio::spawn(async move {
+        let task = async move {
             loop {
                 let message = tokio::select! {
                     _ = &mut shutdown_rx => break,
@@ -199,7 +199,7 @@ impl CodeModeDispatchBroker {
                         let host = Arc::clone(&host);
                         let dispatch_gates = Arc::clone(&dispatch_gates);
                         let span = dispatch_trace.span.clone();
-                        tokio::spawn(async move {
+                        let task = async move {
                             let invocation = {
                                 let dispatch_gate = track_completeness.then(|| {
                                     dispatch_gates
@@ -237,11 +237,13 @@ impl CodeModeDispatchBroker {
                                 response = &mut invocation => response,
                             };
                             let _ = response_tx.send(response);
-                        });
+                        };
+                        tokio::spawn(task.in_current_span());
                     }
                 }
             }
-        });
+        };
+        tokio::spawn(task.in_current_span());
         CodeModeDispatchWorker {
             shutdown_tx: Some(shutdown_tx),
         }

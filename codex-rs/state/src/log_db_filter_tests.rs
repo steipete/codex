@@ -7,6 +7,65 @@ use uuid::Uuid;
 use super::*;
 
 #[tokio::test]
+async fn ephemeral_scopes_never_reach_sqlite_or_feedback_queries() {
+    let codex_home = std::env::temp_dir().join(format!("codex-state-ephemeral-{}", Uuid::new_v4()));
+    let _cleanup = scopeguard::guard(codex_home.clone(), |codex_home| {
+        let _ = std::fs::remove_dir_all(codex_home);
+    });
+    let runtime = StateRuntime::init(
+        crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize runtime");
+    let layer = start(
+        runtime.clone(),
+        Arc::new(super::tests::SharedWriter::default()),
+    );
+    // The privacy boundary must work even without the default target filter.
+    let guard = tracing_subscriber::registry()
+        .with(layer.clone())
+        .set_default();
+    let persistent =
+        tracing::info_span!("session_loop", thread_id = "persistent", ephemeral = false);
+    persistent.in_scope(|| tracing::debug!(op = "persistent sentinel", "Submission"));
+    let private = tracing::info_span!("session_loop", thread_id = "private", ephemeral = true);
+    private.in_scope(|| {
+        tracing::debug!(op = "private sentinel", "Submission");
+        tracing::info_span!("tool", ephemeral = false).in_scope(|| {
+            tracing::error!("private sentinel tool output");
+        });
+        tracing::warn!(parent: &persistent, "private sentinel explicit parent");
+    });
+    tracing::info!(parent: &private, "private sentinel explicit scope");
+    let recorded = tracing::info_span!("thread_start", ephemeral = tracing::field::Empty);
+    recorded.record("ephemeral", true);
+    recorded.record("ephemeral", false);
+    recorded.in_scope(|| tracing::info!("private sentinel recorded scope"));
+    tracing::info!("unrelated diagnostic");
+    layer.flush().await;
+    drop(guard);
+
+    let rows = runtime
+        .query_logs(&crate::LogQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "ephemeral events must never be queued");
+    assert!(
+        rows.iter()
+            .all(|row| !format!("{row:?}").contains("private sentinel"))
+    );
+    for thread_id in ["persistent", "private"] {
+        let logs = runtime.query_feedback_logs(thread_id).await.unwrap();
+        let logs = String::from_utf8(logs).unwrap();
+        assert!(!logs.contains("private sentinel"));
+        if thread_id == "persistent" {
+            assert!(logs.contains("persistent sentinel"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics() {
     let codex_home =
         std::env::temp_dir().join(format!("codex-state-log-db-filter-{}", Uuid::new_v4()));
