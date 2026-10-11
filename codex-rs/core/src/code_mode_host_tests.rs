@@ -21,6 +21,39 @@ use super::ProcessOwnedGrpcCodeModeSessionProvider;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 20);
 
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_host_stderr_does_not_retain_session_content() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use tracing_subscriber::prelude::*;
+
+    let directory = tempfile::tempdir()?;
+    let program = directory.path().join("host");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'private-host-sentinel\\n' >&2\ncat\n",
+    )?;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+    let feedback = codex_feedback::CodexFeedback::new();
+    let _guard = tracing_subscriber::registry()
+        .with(feedback.logger_layer())
+        .set_default();
+    let host = HostConnection::spawn(&program)?;
+    let logs = timeout(TEST_TIMEOUT, async {
+        loop {
+            let logs = String::from_utf8(feedback.snapshot(None).log_attachment(None).buffer)?;
+            if logs.contains("code-mode host emitted stderr") {
+                return Ok::<_, anyhow::Error>(logs);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(!logs.contains("private-host-sentinel"));
+    drop(host);
+    Ok(())
+}
+
 async fn execute(
     session: &Arc<dyn CodeModeSession>,
     source: &str,

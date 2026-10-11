@@ -1173,14 +1173,15 @@ impl Session {
                 let auth_for_prewarm = auth.clone();
                 // Fetch the catalog while MCP and plugin/skill initialization continue.
                 // Context construction still handles filtering and prompt insertion.
-                tokio::spawn(async move {
+                let task = async move {
                     plugins_manager_for_prewarm
                         .recommended_plugins_mode_for_config(
                             &plugins_config,
                             auth_for_prewarm.as_ref(),
                         )
                         .await;
-                });
+                };
+                tokio::spawn(task.in_current_span());
             }
             let mcp_projection = mcp_manager_for_mcp
                 .runtime_config_for_step(
@@ -1932,7 +1933,7 @@ impl Session {
                 mcp_runtime_cwd,
             )
             .await?;
-            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
+            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes, config.ephemeral);
             sess.follow_inherited_environment_configurations(
                 &inherited_environments,
                 &session_configuration.environments,

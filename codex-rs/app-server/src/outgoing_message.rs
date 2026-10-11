@@ -153,6 +153,7 @@ struct PendingCallbackEntry {
     callback: oneshot::Sender<ClientRequestResult>,
     thread_id: Option<ThreadId>,
     request: ServerRequest,
+    span: tracing::Span,
     _diagnostics_guard: GaugeGuard,
 }
 
@@ -389,6 +390,7 @@ impl OutgoingMessageSender {
                     callback: tx_approve,
                     thread_id,
                     request: request.clone(),
+                    span: tracing::Span::current(),
                     _diagnostics_guard: PENDING_SERVER_REQUESTS.track(),
                 },
             );
@@ -480,6 +482,7 @@ impl OutgoingMessageSender {
 
         match entry {
             Some((id, entry)) => {
+                let _span = entry.span.enter();
                 let completed_at_ms = now_unix_timestamp_ms();
                 if entry.verification_owner.is_none()
                     && let Ok(response) = entry.request.response_from_result(result.clone())
@@ -945,9 +948,51 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tokio::time::timeout;
+    use tracing_subscriber::prelude::*;
     use uuid::Uuid;
 
     use super::*;
+
+    #[tokio::test]
+    async fn client_response_logs_keep_the_originating_thread_privacy() {
+        let feedback = codex_feedback::CodexFeedback::new();
+        let _guard = tracing_subscriber::registry()
+            .with(feedback.logger_layer())
+            .set_default();
+        let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(8);
+        let outgoing =
+            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+        for (ephemeral, sentinel) in [(true, "private sentinel"), (false, "persistent sentinel")] {
+            let span = tracing::info_span!("thread_listener", ephemeral);
+            let (request_id, response) = outgoing
+                .send_request(ServerRequestPayload::ToolRequestUserInput(
+                    ToolRequestUserInputParams {
+                        thread_id: ThreadId::new().to_string(),
+                        turn_id: "turn-1".to_string(),
+                        item_id: "call-1".to_string(),
+                        questions: vec![],
+                        is_blocking: true,
+                        auto_resolution_ms: None,
+                    },
+                ))
+                .instrument(span)
+                .await;
+            // Responses arrive on the transport task, outside the thread span.
+            outgoing
+                .notify_client_response(
+                    ConnectionId(1),
+                    request_id,
+                    json!({
+                        "answers": {"question": {"answers": [sentinel]}}
+                    }),
+                )
+                .await;
+            assert!(response.await.unwrap().is_ok());
+        }
+        let logs = String::from_utf8(feedback.snapshot(None).log_attachment(None).buffer).unwrap();
+        assert!(logs.contains("persistent sentinel"));
+        assert!(!logs.contains("private sentinel"));
+    }
 
     #[test]
     fn verify_server_notification_serialization() {

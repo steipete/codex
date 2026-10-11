@@ -22,11 +22,13 @@ use codex_login::AuthEnvTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_state::LogWriteFailureReporter;
+use codex_state::log_privacy::EphemeralThreadFilter;
 use tracing::Event;
 use tracing::Level;
 use tracing::field::Visit;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::FilterExt;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::registry::LookupSpan;
@@ -263,7 +265,8 @@ impl CodexFeedback {
                     // includes full websocket frames and authenticated handshakes.
                     .with_target("tungstenite", LevelFilter::DEBUG)
                     .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
-                    .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF),
+                    .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF)
+                    .and(EphemeralThreadFilter),
             )
     }
 
@@ -278,7 +281,12 @@ impl CodexFeedback {
         FeedbackMetadataLayer {
             inner: self.inner.clone(),
         }
-        .with_filter(Targets::new().with_target(FEEDBACK_TAGS_TARGET, Level::TRACE))
+        .with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.is_span() || metadata.target() == FEEDBACK_TAGS_TARGET
+            })
+            .and(EphemeralThreadFilter),
+        )
     }
 
     pub fn snapshot(&self, session_id: Option<ThreadId>) -> FeedbackSnapshot {

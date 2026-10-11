@@ -80,6 +80,7 @@ use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tracing::Instrument;
 use tracing::warn;
 
 static LIVE_CONNECTIONS: Gauge = Gauge::new("mcp.connections.live");
@@ -671,6 +672,12 @@ impl McpConnectionSet {
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             let publication_gate = publication_gate.clone();
+            let startup_span = tracing::info_span!(
+                parent: None,
+                "mcp_server",
+                server_name = %server_name,
+                ephemeral = config.ephemeral,
+            );
             let startup = async move {
                 if let Some(mut startup_receiver) = startup_receiver
                     && tokio::select! {
@@ -775,7 +782,9 @@ impl McpConnectionSet {
 
                 (server_name, outcome)
             };
-            let startup = AuthStorageOriginator::current().scope(startup);
+            let startup = AuthStorageOriginator::current()
+                .scope(startup)
+                .instrument(startup_span);
             if defer_startup {
                 // Dormant servers must not hold the initial startup summary open.
                 tokio::spawn(startup);

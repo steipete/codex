@@ -59,6 +59,77 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+#[tokio::test]
+async fn ephemeral_submissions_never_reach_retained_logs() -> Result<()> {
+    let server = start_mock_server().await;
+    let log_home = tempfile::tempdir()?;
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(
+            codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(log_home.path())?,
+        ),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let feedback = codex_feedback::CodexFeedback::new();
+    let layer = codex_state::log_db::start(runtime.clone(), Arc::new(feedback.clone()));
+    // A current-thread runtime keeps the subscriber installed for spawned session tasks.
+    let guard = tracing_subscriber::registry()
+        .with(feedback.logger_layer())
+        .with(feedback.metadata_layer())
+        .with(layer.clone())
+        .set_default();
+
+    for (ephemeral, sentinel) in [
+        (true, "W61-private-submission-sentinel"),
+        (false, "W61-persistent-submission-sentinel"),
+    ] {
+        mount_sse_once(
+            &server,
+            responses::sse(vec![
+                ev_response_created("resp"),
+                responses::ev_assistant_message("msg", sentinel),
+                ev_completed("resp"),
+            ]),
+        )
+        .await;
+        let mut builder = test_codex().with_config(move |config| config.ephemeral = ephemeral);
+        let test = builder.build(&server).await?;
+        test.submit_turn(sentinel).await?;
+        test.codex.submit(Op::Shutdown).await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::ShutdownComplete)
+        })
+        .await;
+    }
+    layer.flush().await;
+    drop(guard);
+
+    let rows = runtime
+        .query_logs(&codex_state::LogQuery::default())
+        .await?;
+    assert!(
+        rows.iter()
+            .all(|row| !format!("{row:?}").contains("W61-private-submission-sentinel"))
+    );
+    let persistent_thread = rows
+        .iter()
+        .find(|row| {
+            row.target == "codex_core::session::handlers"
+                && row.message.as_deref().is_some_and(|body| {
+                    body.contains("Submission") && body.contains("operation=\"turn_input\"")
+                })
+        })
+        .and_then(|row| row.thread_id.as_deref())
+        .expect("persistent submission diagnostic");
+    let logs = String::from_utf8(runtime.query_feedback_logs(persistent_thread).await?)?;
+    assert!(logs.contains("W61-persistent-submission-sentinel"));
+    assert!(!logs.contains("W61-private-submission-sentinel"));
+    let memory_logs = String::from_utf8(feedback.snapshot(None).log_attachment(None).buffer)?;
+    assert!(memory_logs.contains("Submission"));
+    assert!(!memory_logs.contains("W61-private-submission-sentinel"));
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_creator_survives_resume_and_forks_use_current_auth() -> Result<()> {
     use base64::Engine;

@@ -295,7 +295,13 @@ pub(super) async fn ensure_listener_task_running(
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
-    tokio::spawn(async move {
+    let listener_span = tracing::info_span!(
+        parent: None,
+        "thread_listener",
+        thread_id = %conversation_id,
+        ephemeral = config_snapshot.ephemeral,
+    );
+    let listener_task = async move {
         loop {
             tokio::select! {
                 biased;
@@ -544,7 +550,11 @@ pub(super) async fn ensure_listener_task_running(
             thread_state_manager.unregister_listener_command_tx(conversation_id);
             thread_state.clear_listener();
         }
-    });
+    };
+    tokio::spawn(tracing::Instrument::instrument(
+        listener_task,
+        listener_span,
+    ));
     Ok(())
 }
 

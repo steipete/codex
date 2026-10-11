@@ -355,6 +355,7 @@ impl Session {
             "turn",
             otel.name = span_name,
             thread.id = %self.thread_id,
+            ephemeral = turn_context.config.ephemeral,
             turn.id = %turn_context.sub_id,
             model = %turn_context.model_info().slug,
             codex.turn.reasoning_effort = %reasoning_effort,

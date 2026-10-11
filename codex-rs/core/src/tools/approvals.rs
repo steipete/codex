@@ -45,6 +45,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use tracing::error;
 use tracing::warn;
 
@@ -602,7 +603,7 @@ impl Session {
         } else if is_network_approval {
             let review_cancel = CancellationToken::new();
             let review_cancel_guard = review_cancel.clone().drop_guard();
-            let review = tokio::spawn(decide_approval(
+            let review = decide_approval(
                 Arc::clone(self),
                 context,
                 review_id,
@@ -612,7 +613,8 @@ impl Session {
                     external_cancel: Some(review_cancel),
                     ..options
                 },
-            ));
+            );
+            let review = tokio::spawn(review.in_current_span());
             let decision = review.await.unwrap_or_else(|err| {
                 warn!("network Guardian review task failed: {err}");
                 Some(ReviewDecision::denied(

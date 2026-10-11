@@ -110,6 +110,7 @@ fn app_server_request_span_template(
         app_server.client_name = field::Empty,
         app_server.client_version = field::Empty,
         turn.id = field::Empty,
+        ephemeral = field::Empty,
     )
 }
 

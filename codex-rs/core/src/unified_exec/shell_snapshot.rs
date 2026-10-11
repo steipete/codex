@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::Instrument;
 
 use codex_exec_server::ExecParams;
 use codex_exec_server::FileSystemSandboxContext;
@@ -62,7 +63,7 @@ impl Session {
 
         let environments = step_context.environments.clone();
         let session = Arc::clone(self);
-        Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let task = async move {
             for environment in environments.turn_environments() {
                 // Remote starts cannot cancel an in-flight capture. Leave them, deferred
                 // environments, and managed networking on the normal lazy capture path.
@@ -163,7 +164,8 @@ impl Session {
                     tracing::debug!("failed to warm shell snapshot: {err}");
                 }
             }
-        })))
+        };
+        Some(AbortOnDropHandle::new(tokio::spawn(task.in_current_span())))
     }
 }
 

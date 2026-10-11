@@ -1149,6 +1149,114 @@ async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
 }
 
 #[tokio::test]
+async fn ephemeral_thread_content_is_absent_from_sqlite_logs() -> Result<()> {
+    use core_test_support::responses;
+
+    let server = responses::start_mock_server().await;
+    responses::mount_sse_sequence(
+        &server,
+        ["W61-private-assistant", "W61-persistent-assistant"]
+            .into_iter()
+            .map(|text| {
+                responses::sse(vec![
+                    responses::ev_response_created("resp"),
+                    responses::ev_assistant_message("msg", text),
+                    // Parsing errors can quote model content even when raw SSE logs are off.
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "malformed",
+                            "usage": {"input_tokens": text, "output_tokens": 0, "total_tokens": 0}
+                        }
+                    }),
+                    responses::ev_completed("resp"),
+                ])
+            })
+            .collect(),
+    )
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let mut thread_ids = Vec::new();
+    for (ephemeral, text) in [(true, "W61-private-input"), (false, "W61-persistent-input")] {
+        let response = mcp
+            .start_thread(ThreadStartParams {
+                ephemeral: Some(ephemeral),
+                ..Default::default()
+            })
+            .await?;
+        thread_ids.push(response.thread.id.clone());
+        let request_id = mcp
+            .send_turn_start_request(TurnStartParams {
+                thread_id: response.thread.id,
+                input: vec![V2UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: vec![],
+                }],
+                ..Default::default()
+            })
+            .await?;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("turn/completed"),
+        )
+        .await??;
+    }
+    let db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(
+            codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(codex_home.path())?,
+        ),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    // Wait for the process-wide sink's periodic flush through the persistent turn's end.
+    let rows = timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let rows = db.query_logs(&codex_state::LogQuery::default()).await?;
+            if rows.iter().any(|row| {
+                row.message.as_deref().is_some_and(|body| {
+                    body.contains("turn/completed") && body.contains(&thread_ids[1])
+                })
+            }) {
+                return Ok::<_, anyhow::Error>(rows);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await??;
+    assert!(
+        rows.iter()
+            .all(|row| row.thread_id.as_deref() != Some(thread_ids[0].as_str()))
+    );
+    let logs = rows
+        .iter()
+        .filter_map(|row| row.message.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!logs.contains("W61-private-input"));
+    assert!(!logs.contains("W61-private-assistant"));
+    assert!(logs.contains("W61-persistent-assistant"));
+    assert!(rows.iter().any(|row| {
+        row.thread_id.as_deref() == Some(thread_ids[1].as_str())
+            && row.target == "codex_core::session::handlers"
+            && row
+                .message
+                .as_deref()
+                .is_some_and(|body| body.contains("Submission"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_start_fails_when_required_mcp_server_fails_to_initialize() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 

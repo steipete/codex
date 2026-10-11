@@ -237,6 +237,7 @@ where
         id: &Id,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        crate::log_privacy::record_ephemeral(attrs, id, &ctx);
         let mut visitor = SpanFieldVisitor::default();
         attrs.record(&mut visitor);
 
@@ -255,6 +256,7 @@ where
         values: &Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        crate::log_privacy::record_ephemeral(values, id, &ctx);
         let mut visitor = SpanFieldVisitor::default();
         values.record(&mut visitor);
 
@@ -276,6 +278,10 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        // Enforce privacy before formatting or queueing, even without a filter.
+        if crate::log_privacy::is_ephemeral_event(event, &ctx) {
+            return;
+        }
         let metadata = event.metadata();
         let target = metadata.target();
         // SQLx can emit from both the inserter task and its separate worker threads.

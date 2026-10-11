@@ -116,6 +116,7 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
@@ -2488,7 +2489,7 @@ where
     let consumer_dropped = CancellationToken::new();
     let consumer_dropped_for_stream = consumer_dropped.clone();
 
-    tokio::spawn(async move {
+    let task = async move {
         let mut logged_error = false;
         let mut tx_last_response = Some(tx_last_response);
         let mut items_added: Vec<ResponseItem> = Vec::new();
@@ -2608,7 +2609,8 @@ where
             upstream_request_id,
             &items_added,
         );
-    });
+    };
+    tokio::spawn(task.in_current_span());
 
     (
         ResponseStream {

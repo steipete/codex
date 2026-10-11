@@ -5,6 +5,7 @@ use codex_async_utils::THREAD_STACK_SIZE_BYTES;
 use codex_protocol::protocol::ReviewDecision;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 
 use super::ApprovalRequestReasons;
 use super::GuardianApprovalRequest;
@@ -26,13 +27,13 @@ pub(crate) fn spawn_approval_decision(
     let request: ReviewAction = request.into();
     let (tx, rx) = oneshot::channel();
     let runtime = session.services.runtime_handle.clone();
+    let span = tracing::Span::current();
     let spawn_result = std::thread::Builder::new()
         .name("codex-approval-review".to_string())
         .stack_size(THREAD_STACK_SIZE_BYTES)
         .spawn(move || {
-            let decision = runtime.block_on(decide_approval(
-                session, context, review_id, request, reasons, options,
-            ));
+            let decision = decide_approval(session, context, review_id, request, reasons, options);
+            let decision = runtime.block_on(decision.instrument(span));
             let _ = tx.send(decision);
         });
     if let Err(err) = spawn_result {

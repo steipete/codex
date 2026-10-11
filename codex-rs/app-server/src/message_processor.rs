@@ -1017,6 +1017,27 @@ impl MessageProcessor {
             _ => None,
         };
         let serialization_scope = codex_request.serialization_scope();
+        let ephemeral = match &codex_request {
+            ClientRequest::ThreadStart { params, .. } => params.ephemeral.unwrap_or(false),
+            ClientRequest::ThreadFork { params, .. } => params.ephemeral,
+            _ => false,
+        };
+        if ephemeral {
+            request_context.span().record("ephemeral", true);
+        }
+        if let Some(codex_app_server_protocol::ClientRequestSerializationScope::Thread {
+            thread_id,
+        }) = &serialization_scope
+            && let Ok(thread_id) = ThreadId::from_string(thread_id)
+            && let Ok(thread) = self
+                .thread_processor
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+            && thread.config_snapshot().await.ephemeral
+        {
+            request_context.span().record("ephemeral", true);
+        }
         let error_request_id = connection_request_id.clone();
         let rpc_gate = Arc::clone(&session.rpc_gate);
         let processor = Arc::clone(self);

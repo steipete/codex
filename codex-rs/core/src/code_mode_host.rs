@@ -111,8 +111,9 @@ impl HostConnection {
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!("code-mode host stderr: {line}");
+                while let Ok(Some(_line)) = lines.next_line().await {
+                    // This process is shared across private and persistent sessions.
+                    tracing::debug!("code-mode host emitted stderr");
                 }
             });
         }
