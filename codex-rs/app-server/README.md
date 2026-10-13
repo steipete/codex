@@ -19,6 +19,16 @@ These errors are not evidence that history is exhausted; callers can retry.
 A successful response with `nextCursor: null` still indicates exhaustion.
 Default scan-and-repair requests retain their filesystem fallback.
 
+Local listings sorted by `recency_at`, with only source/provider filters, discover unindexed rollouts
+before returning the first SQLite cursor. Overlapping first-page requests share
+that discovery pass, and continuation pages use the index without enumerating
+the sessions tree again. A request without a cursor refreshes discovery, so
+rollouts imported between pages appear on refresh. Active and archived listings
+have separate discovery generations. Scan or indexing failures return an error
+instead of reporting an incomplete catalog as exhausted; retry the listing.
+Other sort orders and search, cwd, project, section or relation filters retain
+their existing repair behavior.
+
 # Shutdown admission errors
 
 When graceful shutdown rejects new work, app-server returns JSON-RPC error

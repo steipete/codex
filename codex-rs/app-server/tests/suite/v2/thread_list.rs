@@ -53,6 +53,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
@@ -2564,6 +2565,115 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
     );
     assert!(data.iter().all(|thread| thread.recency_at.is_some()));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_recency_pages_discover_imports_with_default_provider_filter() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "openai".into(),
+    )
+    .await?;
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
+
+    let mut expected_ids = HashSet::new();
+    // The two newest files have older product recency, so page-local repair would
+    // issue a SQLite cursor before discovering any of the later imports.
+    for second in 0..2 {
+        let (filename_ts, metadata_ts) = timestamp_at(2025, 1, 1, 9, 0, second);
+        let id = create_fake_rollout(
+            codex_home.path(),
+            &filename_ts,
+            &metadata_ts,
+            "Existing thread",
+            Some("openai"),
+            /*git_info*/ None,
+        )?;
+        let path = rollout_path(codex_home.path(), &filename_ts, &id);
+        set_rollout_mtime(&path, "2030-01-01T00:00:00Z")?;
+        let mut builder = codex_state::ThreadMetadataBuilder::new(
+            ThreadId::from_string(&id)?,
+            path,
+            DateTime::parse_from_rfc3339(&metadata_ts)?.with_timezone(&Utc),
+            CoreSessionSource::Cli,
+        );
+        builder.recency_at =
+            Some(DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")?.with_timezone(&Utc));
+        builder.cwd = codex_home.path().to_path_buf();
+        let mut metadata = builder.build("openai");
+        metadata.preview = Some("Existing thread".to_string());
+        metadata.first_user_message = metadata.preview.clone();
+        state_db.upsert_thread(&metadata).await?;
+        expected_ids.insert(id);
+    }
+    let existing_ids = expected_ids.clone();
+    let mut mcp = init_mcp(codex_home.path()).await?;
+
+    let mut imported_ids = Vec::new();
+    for index in 0..130 {
+        let (filename_ts, metadata_ts) = timestamp_at(2025, 1, 1, 10, index / 60, index % 60);
+        let id = create_fake_rollout(
+            codex_home.path(),
+            &filename_ts,
+            &metadata_ts,
+            "Imported thread",
+            Some("openai"),
+            /*git_info*/ None,
+        )?;
+        set_rollout_mtime(
+            &rollout_path(codex_home.path(), &filename_ts, &id),
+            &metadata_ts,
+        )?;
+        imported_ids.push(ThreadId::from_string(&id)?);
+        expected_ids.insert(id);
+    }
+    assert!(
+        state_db.get_threads(&imported_ids).await?.is_empty(),
+        "imports must bypass startup backfill"
+    );
+
+    let first = list_threads_with_sort(
+        &mut mcp,
+        /*cursor*/ None,
+        Some(1),
+        /*providers*/ None,
+        /*source_kinds*/ None,
+        Some(ThreadSortKey::RecencyAt),
+        /*archived*/ None,
+    )
+    .await?;
+    assert_eq!(first.data.len(), 1);
+    assert!(!existing_ids.contains(&first.data[0].id));
+    let mut found_ids = HashSet::from([first.data[0].id.clone()]);
+    let mut cursor = Some(
+        first
+            .next_cursor
+            .expect("imports require continuation pages"),
+    );
+    while let Some(next_cursor) = cursor {
+        let page = list_threads_with_sort(
+            &mut mcp,
+            Some(next_cursor),
+            Some(64),
+            /*providers*/ None,
+            /*source_kinds*/ None,
+            Some(ThreadSortKey::RecencyAt),
+            /*archived*/ None,
+        )
+        .await?;
+        assert!(!page.data.is_empty(), "catalog exhausted before its cursor");
+        for thread in page.data {
+            assert!(found_ids.insert(thread.id), "pagination repeated a thread");
+        }
+        assert!(found_ids.len() <= expected_ids.len());
+        cursor = page.next_cursor;
+    }
+    assert_eq!(found_ids, expected_ids);
     Ok(())
 }
 
