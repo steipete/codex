@@ -4,6 +4,7 @@ mod delete_thread;
 mod helpers;
 mod history_revision;
 mod list_threads;
+mod listing_discovery;
 mod live_writer;
 mod model_context;
 mod move_thread_to_section;
@@ -151,6 +152,7 @@ pub struct LocalThreadStore {
     live_writer_locks: Arc<LiveWriterLocks>,
     writer_lock_coordinator: Arc<WriterLockCoordinator>,
     state_db: Option<StateDbHandle>,
+    listing_discovery: Arc<[listing_discovery::ListingDiscovery; 2]>,
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
     thread_data_cleanup: Option<Arc<ThreadDataCleanup>>,
 }
@@ -269,6 +271,7 @@ impl LocalThreadStore {
             live_writer_locks: Arc::new(LiveWriterLocks::default()),
             writer_lock_coordinator,
             state_db,
+            listing_discovery: Arc::new(Default::default()),
             thread_history_db: Arc::new(OnceCell::new()),
             thread_data_cleanup: None,
         }

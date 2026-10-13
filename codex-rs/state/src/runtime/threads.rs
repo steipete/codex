@@ -616,6 +616,16 @@ ON CONFLICT(child_thread_id) DO NOTHING
         &self,
         metadata: &crate::ThreadMetadata,
     ) -> anyhow::Result<bool> {
+        self.insert_thread_if_absent_with_memory_mode(metadata, /*creation_memory_mode*/ None)
+            .await
+    }
+
+    /// Preserve imported memory preferences atomically without overwriting an existing row.
+    pub async fn insert_thread_if_absent_with_memory_mode(
+        &self,
+        metadata: &crate::ThreadMetadata,
+        creation_memory_mode: Option<&str>,
+    ) -> anyhow::Result<bool> {
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
@@ -713,7 +723,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
-        .bind("enabled")
+        .bind(creation_memory_mode.unwrap_or("enabled"))
         .bind(metadata.project_id.as_deref())
         .bind(metadata.daybreak_enabled)
         .execute(self.pool.as_ref())

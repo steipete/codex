@@ -23,7 +23,7 @@ use crate::ThreadStoreResult;
 
 pub(super) async fn list_threads(
     store: &LocalThreadStore,
-    params: ListThreadsParams,
+    mut params: ListThreadsParams,
 ) -> ThreadStoreResult<ThreadPage> {
     if params.sort_key == ThreadSortKey::SectionPosition {
         return list_section_threads(store, params).await;
@@ -55,6 +55,25 @@ pub(super) async fn list_threads(
         model_provider_id: store.config.default_model_provider_id.clone(),
         generate_memories: false,
     };
+    if !params.use_state_db_only
+        && params.sort_key == ThreadSortKey::RecencyAt
+        && params.search_term.is_none()
+        && params.cwd_filters.is_none()
+        && params.section.is_none()
+        && params.project_id.is_none()
+        && params.relation_filter.is_none()
+        && let Some(state) = state_db.as_deref()
+    {
+        let layout = if params.archived {
+            codex_rollout::ThreadListLayout::Flat
+        } else {
+            codex_rollout::ThreadListLayout::NestedByDate
+        };
+        store.listing_discovery[usize::from(params.archived)]
+            .ensure(state, &rollout_config, layout, cursor.as_ref())
+            .await?;
+        params.use_state_db_only = true;
+    }
     let page = list_rollout_threads(
         state_db.clone(),
         &rollout_config,

@@ -77,6 +77,10 @@ async fn updated_candidates_preserve_layout_and_plain_sibling_preference() -> io
         )?;
 
         let mut scanned = 0;
+        assert_eq!(
+            collect_discovery_paths(root.path(), layout).await?,
+            vec![(ThreadId::from_u128(1), path.clone())],
+        );
         let candidates = match layout {
             ThreadListLayout::Flat => {
                 collect_flat_files_by_updated_at(root.path(), &mut scanned).await?
@@ -103,5 +107,21 @@ async fn updated_candidates_preserve_layout_and_plain_sibling_preference() -> io
             ),
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_is_not_limited_to_the_per_page_scan_cap() -> io::Result<()> {
+    let root = TempDir::new()?;
+    let day = root.path().join("2026/10/13");
+    std::fs::create_dir_all(&day)?;
+    for id in 0..=MAX_SCAN_FILES {
+        File::create(day.join(format!(
+            "rollout-2026-10-13T10-00-00-{}.jsonl",
+            Uuid::from_u128(id as u128),
+        )))?;
+    }
+    let paths = collect_discovery_paths(root.path(), ThreadListLayout::NestedByDate).await?;
+    assert_eq!(paths.len(), MAX_SCAN_FILES + 1);
     Ok(())
 }

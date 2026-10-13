@@ -4,6 +4,7 @@
 //! all candidates before sorting; creation-time listings retain directory-level early stopping.
 //! Scans check cancellation between directory entries and candidate metadata lookups.
 
+use codex_protocol::ThreadId;
 use std::cmp::Reverse;
 use std::io;
 use std::path::Path;
@@ -13,6 +14,7 @@ use uuid::Uuid;
 
 use super::MAX_SCAN_FILES;
 use super::ThreadCandidate;
+use super::ThreadListLayout;
 use super::parse_timestamp_uuid_from_filename;
 use super::truncate_to_millis;
 use crate::compression;
@@ -63,6 +65,48 @@ where
 {
     let parent = parent.to_path_buf();
     run_scan(move |scan| collect_dirs_desc_sync(&parent, parse, scan)).await
+}
+
+/// Discovery indexes the whole generation, independently of any SQLite recency cursor.
+pub(crate) async fn collect_discovery_paths(
+    root: &Path,
+    layout: ThreadListLayout,
+) -> io::Result<Vec<(ThreadId, PathBuf)>> {
+    let root = root.to_path_buf();
+    run_scan(move |scan| {
+        let mut paths = Vec::new();
+        let mut append = |directory: &Path| -> io::Result<()> {
+            paths.extend(
+                collect_rollout_day_files_sync(directory, scan)?
+                    .into_iter()
+                    .map(|(_, id, path)| (ThreadId::from_u128(id.as_u128()), path)),
+            );
+            Ok(())
+        };
+        let result = match layout {
+            ThreadListLayout::Flat => append(&root),
+            ThreadListLayout::NestedByDate => (|| {
+                for (_, year) in collect_dirs_desc_sync(&root, |s| s.parse::<u16>().ok(), scan)? {
+                    for (_, month) in collect_dirs_desc_sync(&year, |s| s.parse::<u8>().ok(), scan)?
+                    {
+                        for (_, day) in
+                            collect_dirs_desc_sync(&month, |s| s.parse::<u8>().ok(), scan)?
+                        {
+                            append(&day)?;
+                        }
+                    }
+                }
+                Ok(())
+            })(),
+        };
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !root.exists() => {
+                Ok(Vec::new())
+            }
+            result => result.map(|()| paths),
+        }
+    })
+    .await
 }
 
 pub(super) async fn collect_rollout_day_files(

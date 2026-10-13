@@ -8,6 +8,7 @@ use serde_json::Value;
 
 pub(crate) mod compression;
 pub(crate) mod config;
+mod discovery;
 pub(crate) mod list;
 mod maintenance;
 pub(crate) mod metadata;
@@ -114,6 +115,7 @@ pub async fn materialize_rollout_for_reference(
 pub use config::Config;
 pub use config::RolloutConfig;
 pub use config::RolloutConfigView;
+pub use discovery::discover_thread_metadata;
 pub use list::Cursor;
 pub use list::SortDirection;
 pub use list::ThreadItem;

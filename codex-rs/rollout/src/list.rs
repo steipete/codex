@@ -19,6 +19,7 @@ use uuid::Uuid;
 #[path = "list_files.rs"]
 mod files;
 use files::collect_dirs_desc;
+pub(crate) use files::collect_discovery_paths;
 use files::collect_files_by_updated_at;
 use files::collect_flat_files_by_updated_at;
 use files::collect_flat_rollout_files;
@@ -785,23 +786,42 @@ async fn build_thread_item(
     updated_at: Option<String>,
     preview_filter: PreviewFilter,
 ) -> Option<ThreadItem> {
+    try_build_thread_item(
+        path,
+        allowed_sources,
+        provider_matcher,
+        cwd_filters,
+        updated_at,
+        preview_filter,
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn try_build_thread_item(
+    path: PathBuf,
+    allowed_sources: &[SessionSource],
+    provider_matcher: Option<&ProviderMatcher<'_>>,
+    cwd_filters: Option<&[PathBuf]>,
+    updated_at: Option<String>,
+    preview_filter: PreviewFilter,
+) -> io::Result<Option<ThreadItem>> {
     // Read head and detect preview-bearing events; goal previews can appear before
     // the first normal user message.
-    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT)
-        .await
-        .unwrap_or_default();
+    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT).await?;
     if !allowed_sources.is_empty()
         && !summary
             .source
             .as_ref()
             .is_some_and(|source| allowed_sources.contains(source))
     {
-        return None;
+        return Ok(None);
     }
     if let Some(matcher) = provider_matcher
         && !matcher.matches(summary.model_provider.as_deref())
     {
-        return None;
+        return Ok(None);
     }
     if let Some(cwd_filters) = cwd_filters
         && !summary.cwd.as_ref().is_some_and(|cwd| {
@@ -810,7 +830,7 @@ async fn build_thread_item(
                 .any(|filter| path_utils::paths_match_after_normalization(cwd, filter))
         })
     {
-        return None;
+        return Ok(None);
     }
     if summary.saw_session_meta
         && (matches!(preview_filter, PreviewFilter::IncludeEmpty) || summary.preview.is_some())
@@ -838,7 +858,7 @@ async fn build_thread_item(
         if summary_updated_at.is_none() {
             summary_updated_at = updated_at.or_else(|| created_at.clone());
         }
-        return Some(ThreadItem {
+        return Ok(Some(ThreadItem {
             originator,
             path,
             thread_id,
@@ -863,9 +883,27 @@ async fn build_thread_item(
             created_at,
             recency_at: summary_updated_at.clone(),
             updated_at: summary_updated_at,
-        });
+        }));
     }
-    None
+    Ok(None)
+}
+
+pub(crate) async fn read_discovery_item(
+    path: PathBuf,
+    layout: ThreadListLayout,
+) -> io::Result<Option<ThreadItem>> {
+    try_build_thread_item(
+        path,
+        &[],
+        /*provider_matcher*/ None,
+        /*cwd_filters*/ None,
+        /*updated_at*/ None,
+        match layout {
+            ThreadListLayout::NestedByDate => PreviewFilter::RequirePreview,
+            ThreadListLayout::Flat => PreviewFilter::IncludeEmpty,
+        },
+    )
+    .await
 }
 
 /// Read a single rollout file into the same summary item shape used by thread listing.
